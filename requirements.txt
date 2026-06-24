@@ -1,0 +1,7 @@
+flask
+psycopg2-binary
+sshtunnel
+paramiko==2.12.0
+deepdiff
+jinja2
+websocket-client

@@ -1,0 +1,15 @@
+{
+  "ssh_host": "172.29.32.95",
+  "ssh_port": 22,
+  "ssh_user": "rohit_b_ctr_greyorange_com",
+  "db_host": "10.57.117.116",
+  "db_port": 5432,
+  "db_name": "wms_notification",
+  "db_user": "postgres",
+  "db_table": "subscriber_history",
+  "subscriber_put": 219,
+  "subscriber_pick": 220,
+  "subscriber_audit": null,
+  "subscriber_other": null,
+  "poll_interval": 3
+}
