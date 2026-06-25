@@ -5,3 +5,8 @@ paramiko==2.12.0
 deepdiff
 jinja2
 websocket-client
+PyMuPDF
+
+# Optional (NOT a pip package) — for Allure HTML report generation in Full Run:
+#   brew install allure   (needs a JRE)   OR   npm i -g allure-commandline
+# Without it, Full Run still emits a downloadable allure-results .zip (open with `allure serve`).

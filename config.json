@@ -11,5 +11,15 @@
   "subscriber_pick": 220,
   "subscriber_audit": null,
   "subscriber_other": null,
-  "poll_interval": 3
+  "poll_interval": 3,
+  "project": "EL_Columbus",
+  "topic_host": "172.29.32.39:9003",
+  "topic_host_b": "172.29.32.39:9003",
+  "topic_count": 50,
+  "topics": [
+    {
+      "label": "PUT",
+      "topic": "stpfunction-sbscloud.put_information.events"
+    }
+  ]
 }

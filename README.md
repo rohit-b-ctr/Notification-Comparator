@@ -9,6 +9,21 @@ Automates WMS notification schema validation. Connects to your Postgres DB via S
 pip install -r requirements.txt
 ```
 
+#### Optional — Allure HTML reports
+**Full Run (Live)** always produces a downloadable `allure-results` `.zip`. To also
+auto-generate the **Allure HTML report** in the app, install the Allure CLI (needs a JRE)
+on the machine running `app.py`:
+```bash
+brew install allure                 # macOS (pulls Java if needed)
+# or:  npm install -g allure-commandline   (still needs Java on PATH)
+```
+Without it, the app shows a warning on the dashboard and you can still view results anywhere
+Allure is installed:
+```bash
+unzip allure_<timestamp>.zip -d allure-results
+allure serve allure-results
+```
+
 ### 2. Run
 ```bash
 cd Comparator
