@@ -26,7 +26,7 @@ allure serve allure-results
 
 ### 2. Run
 ```bash
-cd Comparator
+cd Notification-Comparator
 python app.py
 ```
 Then open **http://localhost:5050** in your browser.
