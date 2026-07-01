@@ -12,7 +12,7 @@
   "subscriber_audit": null,
   "subscriber_other": null,
   "poll_interval": 3,
-  "project": "EL_Columbus",
+  "project": "SBS_Cloud",
   "topic_host": "172.29.32.39:9003",
   "topic_host_b": "172.29.32.39:9003",
   "topic_count": 50,

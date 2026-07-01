@@ -6,6 +6,7 @@ deepdiff
 jinja2
 websocket-client
 PyMuPDF
+xmltodict
 
 # Optional (NOT a pip package) — for Allure HTML report generation in Full Run:
 #   brew install allure   (needs a JRE)   OR   npm i -g allure-commandline

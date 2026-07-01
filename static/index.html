@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Notification Comparator</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <div class="logo">
+    <h1>🔔 Notification Comparator</h1>
+    <p>WMS Notification Validator</p>
+  </div>
+  <div class="nav-item active" onclick="showPage('dashboard')">
+    <span class="nav-icon">🏠</span><span class="nav-label">Dashboard</span>
+  </div>
+  <div class="nav-item" onclick="showPage('capture')">
+    <span class="nav-icon">📸</span><span class="nav-label">Capture Golden</span>
+  </div>
+  <div class="nav-item" onclick="showPage('compare')">
+    <span class="nav-icon">🔍</span><span class="nav-label">Compare</span>
+  </div>
+  <div class="nav-item" onclick="showPage('watch')">
+    <span class="nav-icon">👁</span><span class="nav-label">Watch (Live)</span>
+  </div>
+  <div class="nav-item" onclick="showPage('goldens')">
+    <span class="nav-icon">🗂</span><span class="nav-label">Golden Snapshots</span>
+  </div>
+  <div class="nav-item" onclick="showPage('config')">
+    <span class="nav-icon">⚙️</span><span class="nav-label">Config</span>
+  </div>
+</nav>
+
+<!-- Main -->
+<main class="main">
+
+  <!-- DASHBOARD -->
+  <div class="page active" id="page-dashboard">
+    <h2>Dashboard</h2>
+    <p class="subtitle">WMS Notification Schema Comparator</p>
+
+    <!-- FULL RUN (live, all flows) -->
+    <div class="card mt">
+      <div class="card-title">▶ Full Run (Live)</div>
+      <p style="font-size:13px;color:#64748b;margin-bottom:14px">Click <b>Start</b>, then run your whole automation (PUT / PICK / AUDIT). Every notification across <b>all configured flows</b> is compared live against the chosen golden source. Click <b>Stop</b> to finish — an HTML report <b>and an Allure report</b> are generated and saved under <b>Past Reports</b>.</p>
+      <div id="allure-cli-warn" style="display:none;background:#78350f;color:#fcd34d;border:1px solid #b45309;border-radius:6px;padding:10px 12px;font-size:12px;margin-bottom:14px">
+        ⚠️ Allure CLI not detected on the server — Full Run will still produce a downloadable <b>allure-results .zip</b>, but no HTML report.
+        Install it to auto-generate HTML: <code>brew install allure</code> (needs Java) or <code>npm i -g allure-commandline</code>.
+      </div>
+      <label style="margin-bottom:6px">Compare against golden source</label>
+      <div class="flow-pills" style="margin-bottom:8px">
+        <div class="flow-pill active pill-put" id="fullrun-gs-db"   onclick="setFullRunGolden('db')">🗄 DB</div>
+        <div class="flow-pill pill-other"      id="fullrun-gs-isd"  onclick="setFullRunGolden('isd')">📄 ISD</div>
+        <div class="flow-pill pill-pick"       id="fullrun-gs-kowl" onclick="setFullRunGolden('kowl')">🧬 Kowl</div>
+      </div>
+      <div id="fullrun-isd-data" class="flow-pills" style="margin-bottom:14px;display:none">
+        <span style="font-size:11px;color:#64748b;margin-right:2px">ISD golden vs live data from:</span>
+        <div class="flow-pill active pill-put" id="fullrun-isd-db"   onclick="setFullRunIsdData('db')">🗄 DB</div>
+        <div class="flow-pill pill-pick"       id="fullrun-isd-kowl" onclick="setFullRunIsdData('kowl')">🧬 Kowl</div>
+      </div>
+      <div class="flex-row">
+        <div>
+          <label>Poll Interval (seconds)</label>
+          <input type="number" id="fullrun-interval" value="3" min="1" style="width:120px">
+        </div>
+        <button class="btn btn-success" onclick="startFullRun()" id="fullrun-start-btn">▶ Start Full Run</button>
+        <button class="btn btn-danger" onclick="stopFullRun()" id="fullrun-stop-btn" disabled>⏹ Stop</button>
+      </div>
+      <div style="margin-top:14px">
+        <label style="margin:0;display:flex;align-items:center;gap:10px;cursor:pointer;width:fit-content">
+          <div class="toggle-wrap" id="fullrun-mode-wrap" onclick="toggleMode('fullrun')" title="Toggle comparison mode">
+            <div class="toggle-knob" id="fullrun-mode-knob"></div>
+          </div>
+          <span id="fullrun-mode-label" style="font-size:13px;color:#94a3b8">Full Compare</span>
+        </label>
+        <div id="fullrun-mode-hint" style="font-size:11px;color:#4b5563;margin-top:4px">Compares keys, values, and types</div>
+      </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b">
+        <span id="fullrun-status-dot"></span>
+        <span id="fullrun-status-text">Idle</span>
+      </div>
+    </div>
+
+    <div id="fullrun-summary" style="display:none">
+      <div class="summary-strip">
+        <div class="summary-card"><div class="num num-total" id="fr-total">0</div><div class="lbl">Total</div></div>
+        <div class="summary-card"><div class="num num-pass"  id="fr-pass">0</div><div class="lbl">Pass ✅</div></div>
+        <div class="summary-card"><div class="num num-fail"  id="fr-fail">0</div><div class="lbl">Fail ❌</div></div>
+        <div class="summary-card"><div class="num num-warn"  id="fr-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
+      </div>
+    </div>
+
+    <div class="card" id="fullrun-chart-card" style="display:none">
+      <div class="card-title">📊 Pass / Fail Breakdown</div>
+      <div style="display:flex;align-items:center;gap:32px;flex-wrap:wrap">
+        <div class="donut" id="fr-donut">
+          <div class="donut-hole"><span id="fr-donut-pct">0%</span><small>pass</small></div>
+        </div>
+        <div style="font-size:13px">
+          <div style="margin:6px 0"><span class="dot" style="background:#22c55e"></span> Pass <b id="fr-leg-pass">0</b></div>
+          <div style="margin:6px 0"><span class="dot" style="background:#ef4444"></span> Fail <b id="fr-leg-fail">0</b></div>
+          <div style="margin:6px 0"><span class="dot" style="background:#eab308"></span> Other <b id="fr-leg-other">0</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="fullrun-allure-card" style="display:none">
+      <div class="card-title">📦 Allure Report</div>
+      <div id="fullrun-allure-body" style="font-size:13px;color:#94a3b8"></div>
+    </div>
+
+    <div class="card" id="fullrun-log-card" style="display:none">
+      <div class="card-title">Live Log</div>
+      <div class="log-box" id="fullrun-log"></div>
+    </div>
+    <div class="card" id="fullrun-results-card" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="card-title" style="margin:0">Results</div>
+        <a id="fullrun-report-dl" class="btn btn-success" href="#" download style="display:none">⬇ Download HTML Report</a>
+      </div>
+      <table class="results-table">
+        <thead><tr><th>DB ID</th><th>Flow / Time</th><th>Flow Request ID</th><th>Notification Key</th><th>Status</th><th>Diffs</th></tr></thead>
+        <tbody id="fullrun-results-body"></tbody>
+      </table>
+    </div>
+
+    <div class="card mt">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin:0">🗒 Past Reports</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-danger" onclick="deleteSelectedReports()">🗑 Delete Selected (<span id="rep-sel-count">0</span>)</button>
+          <button class="btn btn-danger" onclick="deleteAllReports()">🗑 Delete All</button>
+          <button class="btn btn-ghost" onclick="loadReports()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="dash-reports" style="color:#64748b;font-size:13px">No reports yet.</div>
+    </div>
+  </div>
+
+  <!-- CAPTURE -->
+  <div class="page" id="page-capture">
+    <h2>📸 Capture Golden Snapshots</h2>
+    <p class="subtitle">Save notifications as the expected baseline. Project: <b id="cap-project-label" style="color:#a5b4fc">(none)</b></p>
+
+    <div class="flow-pills" style="margin-bottom:18px">
+      <div class="flow-pill active pill-put"  id="cap-src-tab-db"   onclick="switchCapSource('db')">🗄 From DB</div>
+      <div class="flow-pill pill-pick"         id="cap-src-tab-kowl" onclick="switchCapSource('kowl')">🧬 From Kowl</div>
+      <div class="flow-pill pill-other"        id="cap-src-tab-isd"  onclick="switchCapSource('isd')">📄 From ISD</div>
+    </div>
+
+    <!-- SOURCE: DB -->
+    <div id="cap-src-db">
+    <div class="tabs">
+      <div class="tab active" id="cap-tab-time" onclick="switchCapTab('time')">📅 By Time Range</div>
+      <div class="tab" id="cap-tab-live" onclick="switchCapTab('live')">⚡ Live Poll &amp; Capture</div>
+    </div>
+
+    <!-- Tab 1: By Time/ExtID -->
+    <div id="cap-panel-time">
+      <div class="card">
+        <div class="card-title">Fetch notifications and save as golden</div>
+
+        <div class="tabs" style="margin-bottom:14px;border-bottom:1px solid #2d3148">
+          <div class="tab active" id="cap-fetch-tab-time"  onclick="switchCapFetchTab('time')">📅 By Time</div>
+          <div class="tab"        id="cap-fetch-tab-extid" onclick="switchCapFetchTab('extid')">🔖 By Request ID</div>
+        </div>
+
+        <div class="flow-sub-row">
+          <div>
+            <label>Flow Type</label>
+            <div class="flow-pills" id="cap-flow-pills">
+              <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cap','PUT')">PUT</div>
+              <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cap','PICK')">PICK</div>
+              <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cap','AUDIT')">AUDIT</div>
+              <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cap','OTHER')">Other</div>
+            </div>
+          </div>
+          <div class="sub-input-wrap">
+            <label>Subscriber ID</label>
+            <input type="number" id="cap-subscriber" placeholder="auto-filled">
+          </div>
+        </div>
+
+        <div id="cap-fetch-panel-time" style="margin-top:12px">
+          <label>Since (optional — leave blank for last 100)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="datetime-local" id="cap-since" style="flex:1">
+            <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="document.getElementById('cap-since').value=''">✕ Clear</button>
+          </div>
+        </div>
+
+        <div id="cap-fetch-panel-extid" style="margin-top:12px;display:none">
+          <label>External Request ID (externalServiceRequestId)</label>
+          <input type="text" id="cap-extid" placeholder="e.g. rohit_ext_09">
+        </div>
+
+        <div class="mt">
+          <button class="btn btn-success" onclick="doCapture()" id="cap-btn">📸 Capture</button>
+        </div>
+      </div>
+      <div class="card" id="cap-result" style="display:none">
+        <div class="card-title">Result</div>
+        <div id="cap-result-body"></div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Live Poll -->
+    <div id="cap-panel-live" style="display:none">
+      <div class="card">
+        <div class="card-title">Poll DB live — click Stop when your flow finishes to save all captured notifications as golden</div>
+
+        <div class="tabs" style="margin-bottom:14px;border-bottom:1px solid #2d3148">
+          <div class="tab active" id="cap-live-fetch-tab-time"  onclick="switchCapLiveFetchTab('time')">📅 By Time</div>
+          <div class="tab"        id="cap-live-fetch-tab-extid" onclick="switchCapLiveFetchTab('extid')">🔖 By Request ID</div>
+        </div>
+
+        <div style="margin-bottom:14px">
+          <label>Flow Type</label>
+          <div class="flow-pills" id="cap-live-flow-pills">
+            <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cap-live','PUT')">PUT</div>
+            <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cap-live','PICK')">PICK</div>
+            <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cap-live','AUDIT')">AUDIT</div>
+            <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cap-live','OTHER')">Other</div>
+          </div>
+        </div>
+        <div class="flex-row">
+          <div class="sub-input-wrap">
+            <label>Subscriber ID</label>
+            <input type="number" id="cap-live-subscriber" placeholder="auto-filled">
+          </div>
+          <div>
+            <label>Poll Interval (seconds)</label>
+            <input type="number" id="cap-live-interval" value="3" min="1">
+          </div>
+          <button class="btn btn-success" onclick="startLiveCapture()" id="cap-live-start-btn">▶ Fetch Now</button>
+          <button class="btn btn-danger"  onclick="stopLiveCapture()"  id="cap-live-stop-btn" disabled>⏹ Stop &amp; Save</button>
+        </div>
+
+        <div id="cap-live-fetch-panel-extid" style="margin-top:12px;display:none">
+          <label>External Request ID (externalServiceRequestId)</label>
+          <input type="text" id="cap-live-extid" placeholder="e.g. rohit_ext_09">
+        </div>
+
+        <div style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b">
+          <span id="cap-live-dot"></span>
+          <span id="cap-live-status">Idle — trigger your flow after clicking Fetch Now</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Live Log</div>
+        <div class="log-box" id="cap-live-log"></div>
+      </div>
+      <div class="card" id="cap-live-result" style="display:none">
+        <div class="card-title">Saved Goldens</div>
+        <div id="cap-live-result-body"></div>
+      </div>
+    </div>
+    </div><!-- /cap-src-db -->
+
+    <!-- SOURCE: KOWL -->
+    <div id="cap-src-kowl" style="display:none">
+      <div class="card">
+        <div class="card-title">Capture golden baseline from Kowl topics</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:12px">Pull recent messages from the Kowl topics and store them as golden under
+          <b id="cap-kowl-project" style="color:#a5b4fc">project</b> → <code>kowl/</code>.</p>
+        <div class="flow-sub-row">
+          <div style="flex:1;min-width:220px">
+            <label>Kowl host:port</label>
+            <input type="text" id="tc-cap-host" placeholder="172.29.32.39:9003">
+          </div>
+          <div class="sub-input-wrap">
+            <label>Recent N</label>
+            <input type="number" id="tc-cap-count" placeholder="50">
+          </div>
+        </div>
+        <label>Topics</label>
+        <div id="tc-cap-topics" style="font-size:12px;font-family:monospace;color:#a5b4fc"></div>
+        <div class="mt">
+          <button class="btn btn-success" onclick="captureTopics()" id="tc-cap-btn">📥 Capture Baseline (snapshot)</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⚡ Live Capture</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:12px">Click <b>Start</b>, then run your flow. Every new Kowl topic message is saved as kowl golden (one per state/key, latest wins) until you click <b>Stop</b>.</p>
+        <div class="flex-row" style="align-items:flex-end">
+          <div class="sub-input-wrap">
+            <label>Poll Interval (seconds)</label>
+            <input type="number" id="kc-interval" value="3" min="1">
+          </div>
+          <button class="btn btn-success" onclick="startKowlCapture()" id="kc-start-btn">▶ Start Live Capture</button>
+          <button class="btn btn-danger" onclick="stopKowlCapture()" id="kc-stop-btn" disabled>⏹ Stop</button>
+        </div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b">
+          <span id="kc-dot"></span><span id="kc-status">Idle</span>
+        </div>
+        <div class="log-box" id="kc-log" style="display:none;margin-top:12px"></div>
+      </div>
+
+      <div class="card" id="tc-cap-result" style="display:none">
+        <div class="card-title">Stored baseline keys</div>
+        <div id="tc-cap-result-body"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="card-title" style="margin:0">Current baseline (<span id="tc-baseline-count">0</span> keys)</div>
+          <button class="btn btn-ghost" onclick="loadTopicBaselines()">↻ Refresh</button>
+        </div>
+        <div id="tc-baseline-list"><div class="no-results">No baseline captured yet.</div></div>
+      </div>
+    </div>
+
+    <!-- SOURCE: ISD -->
+    <div id="cap-src-isd" style="display:none">
+      <div class="card">
+        <div class="card-title">📄 Generate golden from an ISD document (PDF)</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:14px">
+          Upload the Interface Specification Document. Sample notification payloads found in the PDF are
+          extracted and saved as golden data under the current project
+          (<b id="cap-isd-project" style="color:#a5b4fc">none</b>).</p>
+        <label>ISD PDF file</label>
+        <input type="file" id="cap-isd-file" accept="application/pdf"
+               style="width:100%;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:13px">
+        <div class="mt">
+          <button class="btn btn-success" onclick="uploadISD()" id="cap-isd-btn">📄 Read ISD &amp; Capture Golden</button>
+        </div>
+      </div>
+      <div class="card" id="cap-isd-result" style="display:none">
+        <div class="card-title">ISD extraction result</div>
+        <div id="cap-isd-result-body"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">➕ Paste payload(s) as golden</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:10px">Some ISD payloads (large PICK/audit samples) can't be auto-extracted because the PDF's JSON is malformed (smart quotes, line-wrapped tokens). Copy a payload from the doc, paste it here, click <b>✨ Beautify</b> to validate/fix, then save. Accepts one object, an array, or several pasted objects.</p>
+        <textarea id="isd-paste" rows="10" spellcheck="false"
+          style="width:100%;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:10px;color:#e2e8f0;font-size:12px;font-family:monospace" placeholder='Paste an ISD notification payload (the whole { "id": ..., "payload": { ... } } block)'></textarea>
+        <div class="mt" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button class="btn-xs btn-xs-view" onclick="beautifyJson('isd-paste')">✨ Beautify</button>
+          <button class="btn btn-success" id="isd-paste-btn" onclick="saveIsdPaste()">💾 Save pasted as golden</button>
+          <span id="isd-paste-status" style="font-size:12px"></span>
+        </div>
+        <div id="isd-paste-result" style="margin-top:10px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- COMPARE -->
+  <div class="page" id="page-compare">
+    <h2>🔍 Compare</h2>
+    <p class="subtitle">Diff notifications against a golden source, or directly diff two JSON documents.</p>
+
+    <div class="flow-pills" style="margin-bottom:16px;align-items:center">
+      <span style="font-size:11px;color:#64748b;margin-right:2px">Golden compare:</span>
+      <div class="flow-pill active pill-put" id="cmp-gs-db"   onclick="setCompareGolden('db')">🗄 DB</div>
+      <div class="flow-pill pill-other"      id="cmp-gs-isd"  onclick="setCompareGolden('isd')">📄 ISD</div>
+      <div class="flow-pill pill-pick"       id="cmp-gs-kowl" onclick="setCompareGolden('kowl')">🧬 Kowl</div>
+      <span style="display:inline-block;width:1px;height:22px;background:#2d3148;margin:0 10px"></span>
+      <div class="flow-pill pill-audit"      id="cmp-gs-json" onclick="setCompareGolden('json')">🧩 Direct JSON</div>
+      <div class="flow-pill pill-other"      id="cmp-gs-xml"  onclick="setCompareGolden('xml')">📰 Direct XML</div>
+    </div>
+
+    <!-- ISD golden can validate either DB-fetched or Kowl-fetched live data -->
+    <div id="cmp-isd-data" class="flow-pills" style="margin-bottom:16px;align-items:center;display:none">
+      <span style="font-size:11px;color:#64748b;margin-right:2px">ISD golden vs live data from:</span>
+      <div class="flow-pill active pill-put" id="cmp-isd-db"   onclick="setIsdDataSource('db')">🗄 DB</div>
+      <div class="flow-pill pill-pick"       id="cmp-isd-kowl" onclick="setIsdDataSource('kowl')">🧬 Kowl</div>
+    </div>
+
+    <div class="tabs" id="cmp-tabs-row">
+      <div class="tab active" id="cmp-tab-time"  onclick="switchCmpTab('time')">📅 By Time Range</div>
+      <div class="tab"        id="cmp-tab-extid" onclick="switchCmpTab('extid')">🔖 By Request ID</div>
+    </div>
+
+    <div id="cmp-src-notif">
+    <div class="card">
+      <div class="flow-sub-row" style="margin-bottom:14px">
+        <div>
+          <label>Flow Type</label>
+          <div class="flow-pills" id="cmp-flow-pills">
+            <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cmp','PUT')">PUT</div>
+            <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cmp','PICK')">PICK</div>
+            <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cmp','AUDIT')">AUDIT</div>
+            <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cmp','OTHER')">Other</div>
+          </div>
+        </div>
+        <div class="sub-input-wrap">
+          <label>Subscriber ID</label>
+          <input type="number" id="cmp-subscriber" placeholder="auto-filled">
+        </div>
+      </div>
+
+      <!-- Time panel -->
+      <div id="cmp-panel-time" style="margin-top:12px">
+        <label>Since</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="datetime-local" id="cmp-since" style="flex:1">
+          <button class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="document.getElementById('cmp-since').value=''">✕ Clear</button>
+        </div>
+      </div>
+
+      <!-- Ext ID panel -->
+      <div id="cmp-panel-extid" style="margin-top:12px;display:none">
+        <label>External Request ID (externalServiceRequestId)</label>
+        <input type="text" id="cmp-extid" placeholder="e.g. rohit_ext_09">
+      </div>
+
+      <div style="margin-top:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="doCompare()" id="cmp-btn">🔍 Compare</button>
+        <label style="margin:0;display:flex;align-items:center;gap:10px;cursor:pointer">
+          <div class="toggle-wrap" id="cmp-mode-wrap" onclick="toggleMode('cmp')">
+            <div class="toggle-knob" id="cmp-mode-knob"></div>
+          </div>
+          <span id="cmp-mode-label" style="font-size:13px;color:#94a3b8">Full Compare</span>
+        </label>
+        <span id="cmp-mode-hint" style="font-size:11px;color:#4b5563">Compares keys, values, and types</span>
+      </div>
+    </div>
+    <div id="cmp-summary" style="display:none">
+      <div class="summary-strip">
+        <div class="summary-card"><div class="num num-total" id="cmp-total">0</div><div class="lbl">Total</div></div>
+        <div class="summary-card"><div class="num num-pass" id="cmp-pass">0</div><div class="lbl">Pass ✅</div></div>
+        <div class="summary-card"><div class="num num-fail" id="cmp-fail">0</div><div class="lbl">Fail ❌</div></div>
+        <div class="summary-card"><div class="num num-warn" id="cmp-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
+      </div>
+    </div>
+    <div class="card" id="cmp-results-card" style="display:none">
+      <div class="card-title">Results</div>
+      <table class="results-table">
+        <thead><tr>
+          <th>DB ID</th><th>Time</th><th>Flow Request ID</th><th>Notification Key</th><th>Status</th><th>Diffs</th>
+        </tr></thead>
+        <tbody id="cmp-results-body"></tbody>
+      </table>
+    </div>
+    </div><!-- /cmp-src-notif -->
+
+    <!-- Direct JSON compare (any JSON — incl. Erlang-related schema) -->
+    <div id="cmp-src-json" style="display:none">
+      <div class="card">
+        <div class="card-title">🧩 Compare two JSON documents directly</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:14px">Paste or upload an <b>Expected (A)</b> and an <b>Actual (B)</b> JSON. Works for any JSON — notification payloads, Erlang-related schema, configs, anything.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <label style="margin:0">Expected / Baseline (A)</label>
+              <span>
+                <button class="btn-xs btn-xs-view" onclick="beautifyJson('json-a')" title="Pretty-print">✨ Beautify</button>
+                <button class="btn-xs btn-xs-view" onclick="minifyJson('json-a')" title="Collapse to one line">／ Minify</button>
+              </span>
+            </div>
+            <textarea id="json-a" rows="14" spellcheck="false"
+              style="width:100%;margin-top:5px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:10px;color:#e2e8f0;font-size:12px;font-family:monospace" placeholder='{ "paste expected JSON here": true }'></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="json-a-file" accept=".json,application/json,text/plain" style="font-size:12px;color:#94a3b8" onchange="loadJsonFile('json-a', this)">
+              <span id="json-a-status" style="font-size:11px"></span>
+            </div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <label style="margin:0">Actual / Candidate (B)</label>
+              <span>
+                <button class="btn-xs btn-xs-view" onclick="beautifyJson('json-b')" title="Pretty-print">✨ Beautify</button>
+                <button class="btn-xs btn-xs-view" onclick="minifyJson('json-b')" title="Collapse to one line">／ Minify</button>
+              </span>
+            </div>
+            <textarea id="json-b" rows="14" spellcheck="false"
+              style="width:100%;margin-top:5px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:10px;color:#e2e8f0;font-size:12px;font-family:monospace" placeholder='{ "paste actual JSON here": true }'></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="json-b-file" accept=".json,application/json,text/plain" style="font-size:12px;color:#94a3b8" onchange="loadJsonFile('json-b', this)">
+              <span id="json-b-status" style="font-size:11px"></span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="json-cmp-btn" onclick="doJsonCompare()">🧩 Compare JSON</button>
+          <div class="flow-pills">
+            <div class="flow-pill active pill-put" id="json-mode-full"   onclick="setJsonMode('full')">Full</div>
+            <div class="flow-pill pill-pick"       id="json-mode-schema" onclick="setJsonMode('schema')">Schema only</div>
+          </div>
+          <label style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#94a3b8">
+            <input type="checkbox" id="json-ignore-dyn"> ignore dynamic fields (ids, timestamps…)
+          </label>
+          <span id="json-cmp-err" style="font-size:12px;color:#fca5a5"></span>
+        </div>
+      </div>
+      <div class="summary-strip" id="json-summary" style="display:none">
+        <div class="summary-card"><div class="num" id="json-verdict" style="font-size:18px">—</div><div class="lbl">Result</div></div>
+        <div class="summary-card"><div class="num" id="json-diffs" style="color:#fca5a5">0</div><div class="lbl">Differences</div></div>
+      </div>
+      <div class="card" id="json-result-card" style="display:none">
+        <div class="card-title">Diff</div>
+        <table class="results-table">
+          <thead><tr><th>Pair</th><th>Source</th><th></th><th>Key</th><th>Status</th><th>Diffs</th></tr></thead>
+          <tbody id="json-result-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Direct XML compare (parsed to a dict and diffed like JSON) -->
+    <div id="cmp-src-xml" style="display:none">
+      <div class="card">
+        <div class="card-title">📰 Compare two XML documents directly</div>
+        <p style="font-size:13px;color:#64748b;margin-bottom:14px">Paste or upload an <b>Expected (A)</b> and an <b>Actual (B)</b> XML. Each document is parsed into a structure and diffed exactly like JSON — attributes appear as <code>@name</code> keys, text as <code>#text</code>.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <label style="margin:0">Expected / Baseline (A)</label>
+            <textarea id="xml-a" rows="14" spellcheck="false"
+              style="width:100%;margin-top:5px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:10px;color:#e2e8f0;font-size:12px;font-family:monospace" placeholder="&lt;root&gt;&lt;paste&gt;expected XML here&lt;/paste&gt;&lt;/root&gt;"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="xml-a-file" accept=".xml,text/xml,application/xml,text/plain" style="font-size:12px;color:#94a3b8" onchange="loadXmlFile('xml-a', this)">
+              <span id="xml-a-status" style="font-size:11px"></span>
+            </div>
+          </div>
+          <div>
+            <label style="margin:0">Actual / Candidate (B)</label>
+            <textarea id="xml-b" rows="14" spellcheck="false"
+              style="width:100%;margin-top:5px;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:10px;color:#e2e8f0;font-size:12px;font-family:monospace" placeholder="&lt;root&gt;&lt;paste&gt;actual XML here&lt;/paste&gt;&lt;/root&gt;"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="xml-b-file" accept=".xml,text/xml,application/xml,text/plain" style="font-size:12px;color:#94a3b8" onchange="loadXmlFile('xml-b', this)">
+              <span id="xml-b-status" style="font-size:11px"></span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="xml-cmp-btn" onclick="doXmlCompare()">📰 Compare XML</button>
+          <div class="flow-pills">
+            <div class="flow-pill active pill-put" id="xml-mode-full"   onclick="setXmlMode('full')">Full</div>
+            <div class="flow-pill pill-pick"       id="xml-mode-schema" onclick="setXmlMode('schema')">Schema only</div>
+          </div>
+          <label style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#94a3b8">
+            <input type="checkbox" id="xml-ignore-dyn"> ignore dynamic fields (ids, timestamps…)
+          </label>
+          <span id="xml-cmp-err" style="font-size:12px;color:#fca5a5"></span>
+        </div>
+      </div>
+      <div class="summary-strip" id="xml-summary" style="display:none">
+        <div class="summary-card"><div class="num" id="xml-verdict" style="font-size:18px">—</div><div class="lbl">Result</div></div>
+        <div class="summary-card"><div class="num" id="xml-diffs" style="color:#fca5a5">0</div><div class="lbl">Differences</div></div>
+      </div>
+      <div class="card" id="xml-result-card" style="display:none">
+        <div class="card-title">Diff</div>
+        <table class="results-table">
+          <thead><tr><th>Pair</th><th>Source</th><th></th><th>Key</th><th>Status</th><th>Diffs</th></tr></thead>
+          <tbody id="xml-result-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- COMPARE: Kowl golden (fetch topics, diff vs kowl baseline) -->
+    <div id="cmp-src-kowl" style="display:none">
+      <div class="card">
+        <div class="card-title">Compare live Kowl topics against the stored kowl golden baseline</div>
+        <div class="flow-sub-row">
+          <div style="flex:1;min-width:220px">
+            <label>Target Kowl host:port</label>
+            <input type="text" id="tc-cmp-host" placeholder="172.29.32.39:9003">
+          </div>
+          <div class="sub-input-wrap">
+            <label>Recent N</label>
+            <input type="number" id="tc-cmp-count" placeholder="50">
+          </div>
+          <div class="sub-input-wrap" style="width:auto">
+            <label>Mode</label>
+            <div class="flow-pills">
+              <div class="flow-pill active pill-put" id="tc-mode-full"   onclick="setTopicMode('full')">Full</div>
+              <div class="flow-pill pill-pick"       id="tc-mode-schema" onclick="setTopicMode('schema')">Schema only</div>
+            </div>
+          </div>
+        </div>
+        <div class="mt">
+          <button class="btn btn-primary" onclick="compareTopics()" id="tc-cmp-btn">🔍 Compare</button>
+        </div>
+      </div>
+      <div class="summary-strip" id="tc-summary" style="display:none">
+        <div class="summary-card"><div class="num" id="tc-total" style="color:#93c5fd">0</div><div class="lbl">Total</div></div>
+        <div class="summary-card"><div class="num" id="tc-pass"  style="color:#86efac">0</div><div class="lbl">Pass</div></div>
+        <div class="summary-card"><div class="num" id="tc-fail"  style="color:#fca5a5">0</div><div class="lbl">Fail</div></div>
+        <div class="summary-card"><div class="num" id="tc-nob"   style="color:#fcd34d">0</div><div class="lbl">No Baseline</div></div>
+      </div>
+      <div class="card" id="tc-cmp-result" style="display:none">
+        <div class="card-title">Results</div>
+        <table class="results-table">
+          <thead><tr><th>Offset</th><th>Topic</th><th>Entity</th><th>Key</th><th>Status</th><th>Diffs</th></tr></thead>
+          <tbody id="tc-results-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- WATCH -->
+  <div class="page" id="page-watch">
+    <h2>👁 Watch Mode (Live)</h2>
+    <p class="subtitle">Polls DB every N seconds. Start watching, then trigger your flow.</p>
+    <div class="card">
+      <div class="card-title">Settings</div>
+
+      <div class="tabs" id="watch-fetch-tabs" style="margin-bottom:14px;border-bottom:1px solid #2d3148">
+        <div class="tab active" id="watch-fetch-tab-time"  onclick="switchWatchFetchTab('time')">📅 By Time</div>
+        <div class="tab"        id="watch-fetch-tab-extid" onclick="switchWatchFetchTab('extid')">🔖 By Request ID</div>
+      </div>
+
+      <div style="margin-bottom:14px">
+        <label>Compare against golden source</label>
+        <div class="flow-pills">
+          <div class="flow-pill active pill-put" id="watch-gs-db"   onclick="setWatchGolden('db')">🗄 DB</div>
+          <div class="flow-pill pill-other"      id="watch-gs-isd"  onclick="setWatchGolden('isd')">📄 ISD</div>
+          <div class="flow-pill pill-pick"       id="watch-gs-kowl" onclick="setWatchGolden('kowl')">🧬 Kowl</div>
+        </div>
+        <div id="watch-isd-data" class="flow-pills" style="margin-top:8px;display:none">
+          <span style="font-size:11px;color:#64748b;margin-right:2px">ISD golden vs live data from:</span>
+          <div class="flow-pill active pill-put" id="watch-isd-db"   onclick="setWatchIsdData('db')">🗄 DB</div>
+          <div class="flow-pill pill-pick"       id="watch-isd-kowl" onclick="setWatchIsdData('kowl')">🧬 Kowl</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:14px" id="watch-flow-block">
+        <label>Flow Type</label>
+        <div class="flow-pills" id="watch-flow-pills">
+          <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('watch','PUT')">PUT</div>
+          <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('watch','PICK')">PICK</div>
+          <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('watch','AUDIT')">AUDIT</div>
+          <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('watch','OTHER')">Other</div>
+        </div>
+      </div>
+      <div id="watch-kowl-note" style="display:none;margin-bottom:14px;font-size:12px;color:#64748b">
+        🧬 Topic-based — watches the configured Kowl topics (<span id="watch-kowl-topics">…</span>). No subscriber needed.
+      </div>
+      <div class="flex-row">
+        <div class="sub-input-wrap" id="watch-sub-wrap">
+          <label>Subscriber ID</label>
+          <input type="number" id="watch-subscriber" placeholder="auto-filled">
+        </div>
+        <div>
+          <label>Poll Interval (seconds)</label>
+          <input type="number" id="watch-interval" value="3" min="1">
+        </div>
+        <button class="btn btn-success" onclick="startWatch()" id="watch-start-btn">▶ Start</button>
+        <button class="btn btn-danger" onclick="stopWatch()" id="watch-stop-btn" disabled>⏹ Stop</button>
+      </div>
+
+      <div id="watch-fetch-panel-extid" style="margin-top:12px;display:none">
+        <label>External Request ID (externalServiceRequestId)</label>
+        <input type="text" id="watch-extid" placeholder="e.g. rohit_ext_09">
+      </div>
+
+      <div style="margin-top:14px">
+        <label style="margin:0;display:flex;align-items:center;gap:10px;cursor:pointer;width:fit-content">
+          <div class="toggle-wrap" id="watch-mode-wrap" onclick="toggleMode('watch')" title="Toggle comparison mode">
+            <div class="toggle-knob" id="watch-mode-knob"></div>
+          </div>
+          <span id="watch-mode-label" style="font-size:13px;color:#94a3b8">Full Compare</span>
+        </label>
+        <div id="watch-mode-hint" style="font-size:11px;color:#4b5563;margin-top:4px">Compares keys, values, and types</div>
+      </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:12px;color:#64748b" id="watch-status-row">
+        <span id="watch-status-dot"></span>
+        <span id="watch-status-text">Idle</span>
+      </div>
+    </div>
+    <div id="watch-summary" style="display:none">
+      <div class="summary-strip">
+        <div class="summary-card"><div class="num num-total" id="w-total">0</div><div class="lbl">Total</div></div>
+        <div class="summary-card"><div class="num num-pass"  id="w-pass">0</div><div class="lbl">Pass ✅</div></div>
+        <div class="summary-card"><div class="num num-fail"  id="w-fail">0</div><div class="lbl">Fail ❌</div></div>
+        <div class="summary-card"><div class="num num-warn"  id="w-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Live Log</div>
+      <div class="log-box" id="watch-log"></div>
+    </div>
+    <div class="card" id="watch-results-card" style="display:none">
+      <div class="card-title">Results</div>
+      <table class="results-table">
+        <thead><tr>
+          <th>DB ID</th><th>Time</th><th>Flow Request ID</th><th>Notification Key</th><th>Status</th><th>Diffs</th>
+        </tr></thead>
+        <tbody id="watch-results-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- CONFIG -->
+  <div class="page" id="page-config">
+    <h2>⚙️ Config</h2>
+    <p class="subtitle">Non-secret settings are saved to <code>config.json</code>. Secrets are kept in memory only and must be entered each time the app starts.</p>
+
+    <!-- Secrets banner -->
+    <div id="cfg-secrets-banner" style="display:none;background:#450a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#fca5a5">
+      ⚠️ <strong>Secrets required</strong> — Enter DB password and SSH key path below before connecting.
+    </div>
+
+    <!-- SECRETS SECTION -->
+    <div class="card" style="border-color:#4f46e5">
+      <div class="card-title" style="color:#a5b4fc">🔒 Secrets</div>
+
+      <!-- Auto-loaded banner -->
+      <div id="cfg-secrets-loaded-banner" style="display:none;background:#0f2a1a;border:1px solid #166534;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#86efac;display:flex;align-items:center;justify-content:space-between">
+        <span>✅ Secrets auto-loaded from saved file</span>
+        <button class="btn-xs btn-xs-del" onclick="clearSavedSecrets()">🗑 Remove saved file</button>
+      </div>
+
+      <div class="flex-row">
+
+        <!-- SSH Key -->
+        <div style="flex:1">
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span style="background:#1e2235;border-radius:4px;padding:2px 7px;font-size:11px;color:#818cf8;font-weight:700;letter-spacing:.5px">SSH KEY</span>
+            <span style="color:#4b5563;font-size:11px">path to private key file</span>
+          </label>
+          <div style="display:flex;align-items:stretch;border:1px solid #2d3148;border-radius:8px;overflow:hidden;background:#0a0d14;transition:border-color .2s" onfocusin="this.style.borderColor='#6366f1'" onfocusout="this.style.borderColor='#2d3148'">
+            <div style="padding:0 12px;display:flex;align-items:center;background:#111827;border-right:1px solid #2d3148;color:#4b5563;font-size:16px;flex-shrink:0">🗝️</div>
+            <input type="password" id="cfg-ssh-key" placeholder="e.g. ~/.ssh/id_rsa"
+              style="flex:1;background:transparent;border:none;padding:10px 12px;color:#e2e8f0;font-size:13px;font-family:monospace;outline:none;min-width:0">
+            <button type="button" id="cfg-ssh-key-toggle" onclick="toggleVisible('cfg-ssh-key','cfg-ssh-key-toggle')"
+              style="padding:0 14px;background:none;border:none;border-left:1px solid #2d3148;color:#4b5563;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;transition:color .15s;outline:none"
+              onmouseover="this.style.color='#a5b4fc'" onmouseout="this.style.color='#4b5563'">👁 Show</button>
+          </div>
+        </div>
+
+        <!-- DB Password -->
+        <div style="flex:1">
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span style="background:#1e2235;border-radius:4px;padding:2px 7px;font-size:11px;color:#f59e0b;font-weight:700;letter-spacing:.5px">DB PASS</span>
+            <span style="color:#4b5563;font-size:11px">postgres password</span>
+          </label>
+          <div style="display:flex;align-items:stretch;border:1px solid #2d3148;border-radius:8px;overflow:hidden;background:#0a0d14;transition:border-color .2s" onfocusin="this.style.borderColor='#6366f1'" onfocusout="this.style.borderColor='#2d3148'">
+            <div style="padding:0 12px;display:flex;align-items:center;background:#111827;border-right:1px solid #2d3148;color:#4b5563;font-size:16px;flex-shrink:0">🔑</div>
+            <input type="password" id="cfg-db-pass" placeholder="Enter password"
+              style="flex:1;background:transparent;border:none;padding:10px 12px;color:#e2e8f0;font-size:13px;font-family:monospace;outline:none;min-width:0">
+            <button type="button" id="cfg-db-pass-toggle" onclick="toggleVisible('cfg-db-pass','cfg-db-pass-toggle')"
+              style="padding:0 14px;background:none;border:none;border-left:1px solid #2d3148;color:#4b5563;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;transition:color .15s;outline:none"
+              onmouseover="this.style.color='#a5b4fc'" onmouseout="this.style.color='#4b5563'">👁 Show</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Save to disk toggle -->
+      <label for="cfg-save-disk" style="margin-top:14px;display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="cfg-save-disk" style="width:16px;height:16px;accent-color:#4f46e5;cursor:pointer">
+        <span style="font-size:13px;color:#94a3b8">Save to disk <span style="color:#4b5563;font-size:12px">(stores in <code style="color:#818cf8">.secrets</code> file — skip re-entry on restart)</span></span>
+      </label>
+
+      <div class="mt" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="saveSecrets()" id="cfg-secrets-btn">🔒 Set Secrets</button>
+        <span id="cfg-secrets-status" style="font-size:13px"></span>
+      </div>
+    </div>
+
+    <!-- SAVED CONFIG SECTION -->
+    <div class="card">
+      <div class="card-title">🔐 SSH Tunnel</div>
+      <div class="flex-row">
+        <div><label>SSH Host</label><input type="text" id="cfg-ssh-host"></div>
+        <div><label>SSH Port</label><input type="number" id="cfg-ssh-port"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>SSH User</label><input type="text" id="cfg-ssh-user"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🗄 PostgreSQL</div>
+      <div class="flex-row">
+        <div><label>DB Host (internal, via tunnel)</label><input type="text" id="cfg-db-host"></div>
+        <div><label>DB Port</label><input type="number" id="cfg-db-port"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>Database Name</label><input type="text" id="cfg-db-name"></div>
+        <div><label>Table</label><input type="text" id="cfg-db-table"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>Username</label><input type="text" id="cfg-db-user"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📋 Subscriber IDs <span style="font-size:11px;font-weight:400;color:#64748b;margin-left:8px">At least one required</span></div>
+      <div class="flex-row">
+        <div><label>PUT Subscriber ID</label><input type="number" id="cfg-sub-put" placeholder="e.g. 157"></div>
+        <div><label>PICK Subscriber ID</label><input type="number" id="cfg-sub-pick" placeholder="e.g. 158"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>AUDIT Subscriber ID</label><input type="number" id="cfg-sub-audit" placeholder="e.g. 159"></div>
+        <div><label>Other Subscriber ID</label><input type="number" id="cfg-sub-other" placeholder="e.g. 160"></div>
+      </div>
+      <div id="cfg-sub-error" style="color:#fca5a5;font-size:12px;margin-top:6px;display:none">⚠️ At least one subscriber ID must be set</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🧬 Topic Compare (Kowl / Kafka UI)</div>
+      <div class="flex-row">
+        <div><label>Baseline setup — Kowl host:port</label><input type="text" id="cfg-topic-host" placeholder="172.29.32.39:9003"></div>
+        <div><label>Target setup — Kowl host:port</label><input type="text" id="cfg-topic-host-b" placeholder="172.29.32.39:9003"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>Recent messages per topic</label><input type="number" id="cfg-topic-count" placeholder="50"></div>
+      </div>
+      <label>Topics (one per line — <code>LABEL = topic.name</code>)</label>
+      <textarea id="cfg-topics" rows="4" style="width:100%;background:#0f1117;border:1px solid #2d3148;border-radius:6px;padding:8px 12px;color:#e2e8f0;font-size:12px;font-family:monospace;outline:none" placeholder="PUT = stpfunction-sbscloud.put_information.events"></textarea>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📁 Project</div>
+      <div class="flex-row">
+        <div><label>Current project (golden data is categorized under this name)</label>
+          <input type="text" id="cfg-project" placeholder="e.g. SBSCloud_2026" list="cfg-project-list">
+          <datalist id="cfg-project-list"></datalist>
+        </div>
+      </div>
+      <p style="font-size:11px;color:#64748b;margin-top:6px">Goldens are stored under <code>golden/{project}/{FLOW}/…</code>. Leave blank to use the shared root.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🔧 Defaults</div>
+      <div class="flex-row">
+        <div><label>Watch Poll Interval (seconds)</label><input type="number" id="cfg-poll"></div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;align-items:center">
+      <button type="button" class="btn btn-ghost" onclick="saveConfig()" id="cfg-save-btn">💾 Save Config</button>
+      <button type="button" class="btn btn-ghost" onclick="testConnection()" id="cfg-test-btn">🔌 Test Connection</button>
+      <span id="cfg-status" style="font-size:13px"></span>
+    </div>
+  </div>
+
+  <!-- GOLDENS -->
+  <div class="page" id="page-goldens">
+    <h2>🗂 Golden Snapshots</h2>
+    <p class="subtitle">Saved expected payloads. Click View to inspect, Delete to remove.</p>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin:0">Snapshots</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="g-select-btn" onclick="toggleGoldenSelect()">☑ Select</button>
+          <button class="btn btn-danger" id="g-del-sel-btn" onclick="deleteSelectedGoldens()" style="display:none">🗑 Delete Selected (<span id="g-sel-count">0</span>)</button>
+          <button class="btn btn-danger" onclick="deleteAllGoldens()">🗑 Delete All</button>
+          <button class="btn btn-ghost" onclick="loadGoldens()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="goldens-list"><div class="no-results">Loading...</div></div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Golden Payload</h3>
+      <button class="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <pre id="modal-body"></pre>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
