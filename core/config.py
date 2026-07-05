@@ -29,9 +29,11 @@ DEFAULT_CONFIG = {
     # ── Golden categorization ──
     "project": "",                       # current project — golden saved under golden/{project}/...
     # ── Topic Compare (Kowl / Kafka UI) ──
-    "topic_host": "172.29.32.39:9003",   # baseline setup Kowl host:port
-    "topic_host_b": "172.29.32.39:9003", # target setup Kowl host:port
-    "topic_count": 50,                   # recent N messages to pull per topic
+    "topic_host":     "172.29.32.39:9003",  # baseline Kowl host:port
+    "topic_host_b":   "172.29.32.39:9003",  # target Kowl host:port
+    "topic_prefix":   "",                   # baseline env prefix (e.g. "aph")
+    "topic_prefix_b": "",                   # target env prefix  (e.g. "stpfunction-apotekreg")
+    "topic_count": 50,                      # recent N messages to pull per topic
     "topics": [
         {"label": "PUT",  "topic": "stpfunction-sbscloud.put_information.events"},
         {"label": "SR",   "topic": "stpfunction-sbscloud.service-request-update.events"},

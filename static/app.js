@@ -1062,6 +1062,25 @@ async function startWatch() {
     if (item.type === 'ping') return;
 
     const log = document.getElementById('watch-log');
+
+    // Scanning progress: update a sticky status line instead of spamming the log
+    if (item.type === 'scanning') {
+      let scanEl = document.getElementById('watch-scan-status');
+      if (!scanEl) {
+        scanEl = document.createElement('div');
+        scanEl.id = 'watch-scan-status';
+        scanEl.style.cssText = 'font-size:11px;color:#64748b;padding:2px 0;font-style:italic';
+        log.appendChild(scanEl);
+      }
+      scanEl.textContent = item.msg;
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
+
+    // Remove scan status line once a real event arrives
+    const scanEl = document.getElementById('watch-scan-status');
+    if (scanEl) scanEl.remove();
+
     const line = document.createElement('div');
     line.className = 'log-line log-' + item.type;
     line.textContent = new Date().toLocaleTimeString() + '  ' + item.msg;
@@ -1191,16 +1210,20 @@ async function loadConfig() {
       (pj.projects || []).map(p => `<option value="${p}">`).join('');
   } catch (e) {}
   // topic compare settings
-  document.getElementById('cfg-topic-host').value   = cfg.topic_host   || '';
-  document.getElementById('cfg-topic-host-b').value = cfg.topic_host_b || '';
-  document.getElementById('cfg-topic-count').value  = cfg.topic_count  || 50;
+  document.getElementById('cfg-topic-host').value     = cfg.topic_host     || '';
+  document.getElementById('cfg-topic-host-b').value   = cfg.topic_host_b   || '';
+  document.getElementById('cfg-topic-prefix').value   = cfg.topic_prefix   || '';
+  document.getElementById('cfg-topic-prefix-b').value = cfg.topic_prefix_b || '';
+  document.getElementById('cfg-topic-count').value    = cfg.topic_count    || 50;
   document.getElementById('cfg-topics').value =
     (cfg.topics || []).map(t => `${t.label} = ${t.topic}`).join('\n');
   topicCfg = {
-    host:   cfg.topic_host   || '',
-    host_b: cfg.topic_host_b || '',
-    count:  cfg.topic_count  || 50,
-    topics: cfg.topics || [],
+    host:     cfg.topic_host     || '',
+    host_b:   cfg.topic_host_b   || '',
+    prefix:   cfg.topic_prefix   || '',
+    prefix_b: cfg.topic_prefix_b || '',
+    count:    cfg.topic_count    || 50,
+    topics:   cfg.topics || [],
   };
   // per-flow subscriber IDs
   document.getElementById('cfg-sub-put').value   = cfg.subscriber_put   || '';
@@ -1318,6 +1341,8 @@ async function saveConfig(silent = false) {
     project:           document.getElementById('cfg-project').value.trim(),
     topic_host:        document.getElementById('cfg-topic-host').value.trim(),
     topic_host_b:      document.getElementById('cfg-topic-host-b').value.trim(),
+    topic_prefix:      document.getElementById('cfg-topic-prefix').value.trim(),
+    topic_prefix_b:    document.getElementById('cfg-topic-prefix-b').value.trim(),
     topic_count:       document.getElementById('cfg-topic-count').value || 50,
     topics:            parseTopicsTextarea(document.getElementById('cfg-topics').value),
   };
@@ -1395,6 +1420,7 @@ async function initTopics() {
   try {
     const cfg = await (await fetch('/api/config')).json();
     topicCfg = {host: cfg.topic_host || '', host_b: cfg.topic_host_b || '',
+                prefix: cfg.topic_prefix || '', prefix_b: cfg.topic_prefix_b || '',
                 count: cfg.topic_count || 50, topics: cfg.topics || []};
   } catch (e) {}
   if (!document.getElementById('tc-cap-host').value) document.getElementById('tc-cap-host').value = topicCfg.host;
@@ -1487,21 +1513,60 @@ async function captureTopics() {
   if (!host) { alert('Enter the baseline Kowl host:port'); return; }
   if (!topicCfg.topics.length) { alert('No topics configured. Add them on the Config tab.'); return; }
   btn.disabled = true; btn.textContent = '⏳ Capturing...';
+
+  const card = document.getElementById('tc-cap-result');
+  const body = document.getElementById('tc-cap-result-body');
+  card.style.display = 'block';
+  body.innerHTML = '<div style="font-size:12px;color:#94a3b8">Starting capture...</div>';
+
   try {
-    const res  = await fetch('/api/topics/capture', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({host, count, topics: topicCfg.topics})
+    const res = await fetch('/api/topics/capture/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({host, count, prefix: topicCfg.prefix, topics: topicCfg.topics})
     });
-    const data = await res.json();
-    if (data.error) { alert('Capture failed: ' + data.error); }
-    else {
-      const card = document.getElementById('tc-cap-result');
-      card.style.display = 'block';
-      document.getElementById('tc-cap-result-body').innerHTML =
-        `<div style="font-size:12px;color:#86efac;margin-bottom:10px">✅ Stored ${data.keys} key(s) from ${data.messages} message(s).</div>` +
-        data.saved.map(s => `<div class="golden-item"><span class="golden-name">${s.key}</span><span style="color:#64748b;font-size:11px">${s.count} msg</span></div>`).join('');
-      loadTopicBaselines();
-    }
+    const start = await res.json();
+    if (start.error) { alert('Capture failed: ' + start.error); btn.disabled = false; btn.textContent = '📥 Capture Baseline'; return; }
+
+    const progressLines = {};  // topic -> element id
+    const progressBar = document.createElement('div');
+    progressBar.style.cssText = 'font-size:12px;color:#94a3b8;margin-bottom:8px';
+    body.innerHTML = '';
+    body.appendChild(progressBar);
+
+    await new Promise((resolve) => {
+      const sse = new EventSource('/api/topics/capture/stream');
+      sse.onmessage = (e) => {
+        const item = JSON.parse(e.data);
+        if (item.type === 'ping') return;
+
+        if (item.type === 'progress') {
+          progressBar.textContent = `⏳ [${item.current}/${item.total}] Fetching: ${item.topic}`;
+        } else if (item.type === 'ok') {
+          const div = document.createElement('div');
+          div.style.cssText = 'font-family:monospace;font-size:11px;color:#86efac;padding:1px 0';
+          div.textContent = item.msg;
+          body.insertBefore(div, progressBar);
+        } else if (item.type === 'topic_error') {
+          const div = document.createElement('div');
+          div.style.cssText = 'font-family:monospace;font-size:11px;color:#fca5a5;padding:1px 0';
+          div.textContent = item.msg;
+          body.insertBefore(div, progressBar);
+        } else if (item.type === 'done') {
+          sse.close();
+          progressBar.remove();
+          // Summary
+          const summary = document.createElement('div');
+          summary.style.cssText = 'font-size:12px;margin-top:8px;padding-top:8px;border-top:1px solid #334155';
+          summary.innerHTML = item.keys
+            ? `<span style="color:#86efac">✅ Done — ${item.keys} key(s) from ${item.messages} message(s)</span>`
+            : `<span style="color:#fbbf24">⚠️ No messages captured — topics may be empty</span>`;
+          body.appendChild(summary);
+          loadTopicBaselines();
+          resolve();
+        }
+      };
+      sse.onerror = () => { sse.close(); resolve(); };
+    });
   } catch (e) { alert('Capture error: ' + e); }
   btn.disabled = false; btn.textContent = '📥 Capture Baseline';
 }
@@ -1513,15 +1578,66 @@ async function compareTopics() {
   if (!host) { alert('Enter the target Kowl host:port'); return; }
   if (!topicCfg.topics.length) { alert('No topics configured. Add them on the Config tab.'); return; }
   btn.disabled = true; btn.textContent = '⏳ Comparing...';
+
+  // Show progress area
+  const resultCard = document.getElementById('tc-cmp-result');
+  const body = document.getElementById('tc-results-body');
+  resultCard.style.display = 'block';
+  document.getElementById('tc-summary').style.display = 'none';
+  body.innerHTML = '<tr><td colspan="6"><div style="font-size:12px;color:#94a3b8;padding:8px">Starting compare...</div></td></tr>';
+
   try {
-    const res  = await fetch('/api/topics/compare', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+    const res = await fetch('/api/topics/compare/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({host, count, mode: topicMode, topics: topicCfg.topics,
-                            golden_source: topicGoldenSource})
+                            prefix: topicCfg.prefix_b, golden_source: topicGoldenSource})
     });
-    const data = await res.json();
-    if (data.error) { alert('Compare failed: ' + data.error); }
-    else { renderTopicResults(data.results || []); }
+    const start = await res.json();
+    if (start.error) { alert('Compare failed: ' + start.error); btn.disabled = false; btn.textContent = '🔍 Compare'; return; }
+
+    const progressRow = document.createElement('tr');
+    progressRow.innerHTML = '<td colspan="6"><div id="tc-cmp-progress" style="font-size:12px;color:#94a3b8;padding:8px">Fetching topics...</div></td>';
+    body.innerHTML = '';
+    body.appendChild(progressRow);
+    const progressEl = document.getElementById('tc-cmp-progress');
+
+    await new Promise((resolve) => {
+      const sse = new EventSource('/api/topics/compare/stream');
+      sse.onmessage = (e) => {
+        const item = JSON.parse(e.data);
+        if (item.type === 'ping') return;
+
+        if (item.type === 'progress') {
+          progressEl.textContent = `⏳ [${item.current}/${item.total}] Comparing: ${item.topic}`;
+        } else if (item.type === 'ok') {
+          const info = document.createElement('tr');
+          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:#86efac;padding:2px 8px">${item.msg}</div></td>`;
+          body.insertBefore(info, progressRow);
+        } else if (item.type === 'topic_error') {
+          const info = document.createElement('tr');
+          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:#fca5a5;padding:2px 8px">${item.msg}</div></td>`;
+          body.insertBefore(info, progressRow);
+        } else if (item.type === 'done') {
+          sse.close();
+          progressRow.remove();
+          renderTopicResults(item.results || []);
+          const dl = document.getElementById('tc-report-dl');
+          if (item.report) {
+            dl.href = '/api/report/' + encodeURIComponent(item.report) + '?download=1';
+            dl.style.display = 'inline-flex';
+          } else {
+            dl.style.display = 'none';
+          }
+          if (typeof loadReports === 'function') loadReports();
+          resolve();
+        } else if (item.type === 'error') {
+          sse.close();
+          alert('Compare error: ' + item.msg);
+          resolve();
+        }
+      };
+      sse.onerror = () => { sse.close(); resolve(); };
+    });
   } catch (e) { alert('Compare error: ' + e); }
   btn.disabled = false; btn.textContent = '🔍 Compare';
 }

@@ -1,6 +1,7 @@
 """Kowl/Kafka topic capture, baselines, and comparison."""
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from deepdiff import DeepDiff  # type: ignore[import]
@@ -32,6 +33,19 @@ def clean_topic_payload(env):
     """env = the message's value.payload envelope from Kowl."""
     return strip_fields(normalize(env), TOPIC_IGNORE_FIELDS)
 
+def apply_prefix(topics, prefix):
+    """Prepend env prefix to each topic's name if a prefix is configured.
+    e.g. prefix='aph', topic='item-create.requests' -> 'aph.item-create.requests'
+    If topic already starts with the prefix, leave it unchanged (idempotent)."""
+    if not prefix:
+        return topics
+    result = []
+    for spec in topics:
+        t = spec["topic"]
+        full = t if t.startswith(prefix + ".") else f"{prefix}.{t}"
+        result.append({**spec, "topic": full})
+    return result
+
 def topic_short(topic):
     """stpfunction-sbscloud.put_information.events -> put_information"""
     parts = topic.split(".")
@@ -46,7 +60,7 @@ def topic_notif_key(env, label, topic):
     return f"{label}__{name}__{str(state).strip().lower()}"
 
 def fetch_topic_messages(host, topic, count=50, start_offset=-1,
-                         idle_timeout=12, hard_timeout=45):
+                         idle_timeout=8, hard_timeout=20):
     """
     Consume up to `count` messages from a Kowl topic over its WebSocket API.
     start_offset: -1 = newest (recent N), -2 = oldest.
@@ -54,8 +68,22 @@ def fetch_topic_messages(host, topic, count=50, start_offset=-1,
     """
     if websocket is None:
         raise RuntimeError("websocket-client not installed. Run: pip install websocket-client")
-    url = f"ws://{host}/api/topics/{topic}/messages"
-    ws = websocket.create_connection(url, timeout=idle_timeout)
+    # Strip scheme and trailing slash — config may store a full https:// URL.
+    ws_scheme = "wss" if host.startswith("https") else "ws"
+    bare_host = host.rstrip("/")
+    for prefix in ("https://", "http://"):
+        if bare_host.startswith(prefix):
+            bare_host = bare_host[len(prefix):]
+            break
+    url = f"{ws_scheme}://{bare_host}/api/topics/{topic}/messages"
+    import ssl as _ssl
+    sslopt = {"cert_reqs": _ssl.CERT_NONE} if ws_scheme == "wss" else {}
+    ws = websocket.create_connection(
+        url,
+        timeout=idle_timeout,
+        sslopt=sslopt,
+        header={"Origin": f"https://{bare_host}"},
+    )
     ws.settimeout(idle_timeout)
     req = {
         "topicName": topic, "startOffset": int(start_offset), "startTimestamp": 0,
@@ -68,8 +96,14 @@ def fetch_topic_messages(host, topic, count=50, start_offset=-1,
         while time.time() - start < hard_timeout:
             try:
                 raw = ws.recv()
-            except Exception:
-                break  # idle timeout / connection closed -> assume consume finished
+            except websocket.WebSocketTimeoutException:
+                break  # idle timeout -> no more data
+            except websocket.WebSocketConnectionClosedException:
+                break  # server closed cleanly
+            except Exception as _e:
+                if msgs:
+                    break  # partial data received — treat as done
+                raise RuntimeError(f"WebSocket error: {_e}") from _e
             if not raw:
                 break
             o = json.loads(raw)
@@ -121,17 +155,52 @@ def list_topic_baselines():
 def capture_topics(host, topics, count):
     """Fetch each topic and store one baseline file per derived key. Returns summary."""
     saved = {}
+    errors = []
     for spec in topics:
         label, topic = spec["label"], spec["topic"]
-        for msg in fetch_topic_messages(host, topic, count):
-            env = message_envelope(msg)
-            if env is None:
-                continue
-            key = topic_notif_key(env, label, topic)
-            save_topic_baseline(key, clean_topic_payload(env))  # last message per key wins
-            entry = saved.setdefault(key, {"key": key, "topic": topic, "count": 0})
-            entry["count"] += 1
-    return list(saved.values())
+        try:
+            for msg in _fetch_with_timeout(host, topic, count):
+                env = message_envelope(msg)
+                if env is None:
+                    continue
+                key = topic_notif_key(env, label, topic)
+                save_topic_baseline(key, clean_topic_payload(env))  # last message per key wins
+                entry = saved.setdefault(key, {"key": key, "topic": topic, "count": 0})
+                entry["count"] += 1
+        except Exception as e:
+            errors.append({"topic": topic, "error": str(e)})
+    return list(saved.values()), errors
+
+def capture_topics_thread(host, topics, count, state):
+    """One-shot capture with per-topic progress pushed to state['log_queue']."""
+    log = state["log_queue"]
+    saved, errors = {}, []
+    total = len(topics)
+    for i, spec in enumerate(topics, 1):
+        label, topic = spec["label"], spec["topic"]
+        log.put({"type": "progress", "topic": topic, "label": label,
+                 "current": i, "total": total,
+                 "msg": f"[{i}/{total}] Fetching: {topic} (up to {count} msgs, timeout 20s)…"})
+        try:
+            count_saved = 0
+            for msg in _fetch_with_timeout(host, topic, count):
+                env = message_envelope(msg)
+                if env is None:
+                    continue
+                key = topic_notif_key(env, label, topic)
+                save_topic_baseline(key, clean_topic_payload(env))
+                entry = saved.setdefault(key, {"key": key, "topic": topic, "count": 0})
+                entry["count"] += 1
+                count_saved += 1
+            log.put({"type": "ok", "topic": topic, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] ✅ {topic} — {count_saved} message(s)"})
+        except Exception as e:
+            errors.append({"topic": topic, "error": str(e)})
+            log.put({"type": "topic_error", "topic": topic, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] ✗ {topic}: {e}"})
+    log.put({"type": "done", "saved": list(saved.values()), "errors": errors,
+             "keys": len(saved), "messages": sum(s["count"] for s in saved.values())})
+    state["running"] = False
 
 def kowl_capture_thread(host, interval):
     """Live-poll Kowl topics and save each new message as a kowl golden, until stopped.
@@ -157,7 +226,7 @@ def kowl_capture_thread(host, interval):
                     break
                 label, topic = spec["label"], spec["topic"]
                 try:
-                    for msg in fetch_topic_messages(host, topic, count):
+                    for msg in _fetch_with_timeout(host, topic, count):
                         env = message_envelope(msg)
                         if env is None:
                             continue
@@ -221,22 +290,52 @@ def compare_kowl_env(env, label, topic, mode, golden_source, row_id):
     return {**base, "status": "PASS" if not findings else "FAIL",
             "findings": findings, "payload": payload}
 
-def compare_topics(host, topics, count, mode="full", golden_source="kowl"):
-    """Fetch Kowl topics and diff each message against the chosen golden source."""
-    results = []
-    for spec in topics:
+_FETCH_TIMEOUT = 15  # seconds — hard wall-clock limit per topic fetch
+
+def _fetch_with_timeout(host, topic, count):
+    """Run fetch_topic_messages in a daemon thread; raise if it hangs past _FETCH_TIMEOUT."""
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fetch_topic_messages, host, topic, count)
+    ex.shutdown(wait=False)  # don't block on exit — daemon thread will die with the process
+    try:
+        return fut.result(timeout=_FETCH_TIMEOUT)
+    except FuturesTimeoutError:
+        raise RuntimeError(f"Timed out after {_FETCH_TIMEOUT}s — topic may not exist on this cluster")
+
+def compare_topics(host, topics, count, mode="full", golden_source="kowl", state=None):
+    """Fetch Kowl topics and diff each message against the chosen golden source.
+    If state dict with log_queue is provided, emits per-topic progress events."""
+    results, total = [], len(topics)
+    log = state["log_queue"] if state else None
+    for i, spec in enumerate(topics, 1):
         label, topic = spec["label"], spec["topic"]
-        for msg in fetch_topic_messages(host, topic, count):
-            env = message_envelope(msg)
-            if env is None:
-                continue
-            row_id = f"p{msg.get('partitionID','?')}@{msg.get('offset','?')}"
-            try:
-                results.append(compare_kowl_env(env, label, topic, mode, golden_source, row_id))
-            except Exception as e:
-                results.append({"db_id": row_id, "create_time": topic_short(topic),
-                                "key": "ERROR", "ext_id": "", "status": "ERROR",
-                                "findings": [{"type": "exception", "path": "", "detail": str(e)}]})
+        if log:
+            log.put({"type": "progress", "topic": topic, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Fetching: {topic} (up to {count} msgs, timeout 20s)…"})
+        try:
+            topic_results = []
+            for msg in _fetch_with_timeout(host, topic, count):
+                env = message_envelope(msg)
+                if env is None:
+                    continue
+                row_id = f"p{msg.get('partitionID','?')}@{msg.get('offset','?')}"
+                try:
+                    r = compare_kowl_env(env, label, topic, mode, golden_source, row_id)
+                    topic_results.append(r)
+                except Exception as e:
+                    topic_results.append({"db_id": row_id, "create_time": topic_short(topic),
+                                          "key": "ERROR", "ext_id": "", "status": "ERROR",
+                                          "findings": [{"type": "exception", "path": "", "detail": str(e)}]})
+            results.extend(topic_results)
+            if log:
+                passes = sum(1 for r in topic_results if r["status"] == "PASS")
+                fails  = sum(1 for r in topic_results if r["status"] == "FAIL")
+                log.put({"type": "ok", "topic": topic, "current": i, "total": total,
+                         "msg": f"[{i}/{total}] ✅ {topic} — {len(topic_results)} msg(s), {passes} pass, {fails} fail"})
+        except Exception as e:
+            if log:
+                log.put({"type": "topic_error", "topic": topic, "current": i, "total": total,
+                         "msg": f"[{i}/{total}] ✗ {topic}: {e}"})
     return results
 
 def kowl_watch_loop(state, interval):
@@ -245,7 +344,8 @@ def kowl_watch_loop(state, interval):
     cfg     = load_config()
     host    = (cfg.get("topic_host_b") or cfg.get("topic_host") or "").strip()
     count   = int(cfg.get("topic_count") or 50)
-    topics  = cfg.get("topics", [])
+    prefix  = (cfg.get("topic_prefix_b") or "").strip()
+    topics  = apply_prefix(cfg.get("topics", []), prefix)
     mode    = state.get("mode", "full")
     gsource = state.get("source", "kowl")
     log     = state["log_queue"]
@@ -257,12 +357,15 @@ def kowl_watch_loop(state, interval):
     primed = False   # first sweep baselines existing messages; only newer ones are compared
     try:
         while state["running"]:
-            for spec in topics:
+            for i, spec in enumerate(topics, 1):
                 if not state["running"]:
                     break
                 label, topic = spec["label"], spec["topic"]
+                if primed:
+                    log.put({"type": "scanning", "topic": topic, "current": i, "total": len(topics),
+                             "msg": f"🔍 [{i}/{len(topics)}] Scanning: {topic}"})
                 try:
-                    for msg in fetch_topic_messages(host, topic, count):
+                    for msg in _fetch_with_timeout(host, topic, count):
                         env = message_envelope(msg)
                         if env is None:
                             continue
@@ -280,7 +383,7 @@ def kowl_watch_loop(state, interval):
                                  "msg": f"{icon} {label} {r['key']} — {len(r['findings'])} diff(s)",
                                  "result": r})
                 except Exception as e:
-                    log.put({"type": "error", "msg": f"{topic}: {e}"})
+                    log.put({"type": "error", "msg": f"✗ [{i}/{len(topics)}] {topic}: {e}"})
             if not primed:
                 primed = True
                 log.put({"type": "info",

@@ -581,7 +581,10 @@
         <div class="summary-card"><div class="num" id="tc-nob"   style="color:#fcd34d">0</div><div class="lbl">No Baseline</div></div>
       </div>
       <div class="card" id="tc-cmp-result" style="display:none">
-        <div class="card-title">Results</div>
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Results</span>
+          <a id="tc-report-dl" class="btn btn-success" href="#" download style="display:none">⬇ Download HTML Report</a>
+        </div>
         <table class="results-table">
           <thead><tr><th>Offset</th><th>Topic</th><th>Entity</th><th>Key</th><th>Status</th><th>Diffs</th></tr></thead>
           <tbody id="tc-results-body"></tbody>
@@ -796,6 +799,10 @@
       <div class="flex-row">
         <div><label>Baseline setup — Kowl host:port</label><input type="text" id="cfg-topic-host" placeholder="172.29.32.39:9003"></div>
         <div><label>Target setup — Kowl host:port</label><input type="text" id="cfg-topic-host-b" placeholder="172.29.32.39:9003"></div>
+      </div>
+      <div class="flex-row">
+        <div><label>Baseline env prefix <span style="font-weight:400;color:#64748b">(e.g. aph)</span></label><input type="text" id="cfg-topic-prefix" placeholder="aph"></div>
+        <div><label>Target env prefix <span style="font-weight:400;color:#64748b">(e.g. stpfunction-apotekreg)</span></label><input type="text" id="cfg-topic-prefix-b" placeholder="stpfunction-apotekreg"></div>
       </div>
       <div class="flex-row">
         <div><label>Recent messages per topic</label><input type="number" id="cfg-topic-count" placeholder="50"></div>

@@ -1,0 +1,36 @@
+# ─── Secrets (NEVER commit) ──────────────────────────────────────────────────
+.secrets
+*.pem
+*.key
+id_rsa*
+*_rsa
+*.ppk
+
+# ─── Local config that may hold host/IP details ──────────────────────────────
+# config.json is tracked by default; uncomment if it holds anything sensitive:
+# config.json
+
+# ─── Captured data / generated output ────────────────────────────────────────
+topic_baseline/*.json
+golden/**/*.json
+reports/*.html
+reports/*.zip
+reports/*.meta.json
+allure-results/
+bkp/
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ─── OS / editor cruft ───────────────────────────────────────────────────────
+.DS_Store
+*.swp
+.idea/
+.vscode/

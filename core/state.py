@@ -34,3 +34,17 @@ kowl_capture_state = {
     "log_queue": queue.Queue(),
     "thread":  None,
 }
+
+# One-shot topic baseline capture with per-topic progress streaming
+topic_capture_state = {
+    "running":   False,
+    "log_queue": queue.Queue(),
+    "thread":    None,
+}
+
+# One-shot topic compare with per-topic progress streaming
+topic_compare_state = {
+    "running":   False,
+    "log_queue": queue.Queue(),
+    "thread":    None,
+}

@@ -21,6 +21,7 @@ from core.isd import *
 from core.live import capture_live_thread, watch_thread_fn, full_watch_thread_fn
 from core.state import (
     watch_state, full_watch_state, capture_state, kowl_capture_state,
+    topic_capture_state, topic_compare_state,
 )
 
 bp = Blueprint("api", __name__)
@@ -409,38 +410,127 @@ def api_get_topic_baseline(key):
         return jsonify({"error": "not found"}), 404
     return jsonify(data)
 
-@bp.route("/api/topics/capture", methods=["POST"])
-def api_topics_capture():
-    data  = request.get_json(force=True) or {}
-    cfg   = load_config()
-    host  = (data.get("host") or cfg.get("topic_host") or "").strip()
-    count = int(data.get("count") or cfg.get("topic_count") or 50)
+@bp.route("/api/topics/capture/start", methods=["POST"])
+def api_topics_capture_start():
+    if topic_capture_state["running"]:
+        return jsonify({"error": "Capture already running"}), 400
+    data   = request.get_json(force=True) or {}
+    cfg    = load_config()
+    host   = (data.get("host") or cfg.get("topic_host") or "").strip()
+    count  = int(data.get("count") or cfg.get("topic_count") or 50)
+    prefix = (data.get("prefix") or cfg.get("topic_prefix") or "").strip()
+    topics = apply_prefix(_topics_from_request(data), prefix)
     if not host:
         return jsonify({"error": "No Kowl host configured."}), 400
-    try:
-        saved = capture_topics(host, _topics_from_request(data), count)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    total = sum(s["count"] for s in saved)
-    return jsonify({"saved": saved, "keys": len(saved), "messages": total})
+    if not topics:
+        return jsonify({"error": "No topics configured."}), 400
+    topic_capture_state["running"]   = True
+    topic_capture_state["log_queue"] = queue.Queue()
+    t = threading.Thread(target=capture_topics_thread,
+                         args=(host, topics, count, topic_capture_state), daemon=True)
+    topic_capture_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True, "total": len(topics)})
 
-@bp.route("/api/topics/compare", methods=["POST"])
-def api_topics_compare():
-    data  = request.get_json(force=True) or {}
-    cfg   = load_config()
+@bp.route("/api/topics/capture/stream")
+def api_topics_capture_stream():
+    def generate():
+        while True:
+            try:
+                item = topic_capture_state["log_queue"].get(timeout=30)
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") == "done":
+                    break
+            except queue.Empty:
+                yield 'data: {"type":"ping"}\n\n'
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+def _compare_topics_thread(host, topics, count, mode, gsource, state):
+    log = state["log_queue"]
+    started_dt = datetime.now()
+    try:
+        results = compare_topics(host, topics, count, mode=mode, golden_source=gsource, state=state)
+        report = _generate_topic_report(results, mode, gsource, started_dt)
+        log.put({"type": "done", "results": results, **report})
+    except Exception as e:
+        log.put({"type": "error", "msg": str(e)})
+    finally:
+        state["running"] = False
+
+def _generate_topic_report(results, mode, gsource, started_dt):
+    """Build an HTML + Allure report for a topic compare run, mirroring Full Run."""
+    per_flow = {}
+    for r in results:
+        f = r.get("flow", "OTHER")
+        s = per_flow.setdefault(f, {"total": 0, "pass": 0, "fail": 0})
+        s["total"] += 1
+        if r.get("status") == "PASS":
+            s["pass"] += 1
+        elif r.get("status") == "FAIL":
+            s["fail"] += 1
+    stopped_dt = datetime.now()
+    started = started_dt.strftime("%Y-%m-%d %H:%M:%S")
+    stopped = stopped_dt.strftime("%Y-%m-%d %H:%M:%S")
+    project = current_project()
+    meta = {
+        "Project": project or "(none)",
+        "Golden source": gsource,
+        "Mode": mode,
+        "Started": started,
+        "Stopped": stopped,
+        "Flows": ", ".join(f"{k}({v['pass']}/{v['total']})" for k, v in per_flow.items()) or "none",
+    }
+    report_name = save_report(build_html_report(results, "Topic Compare Report", meta), prefix="topic_compare")
+    allure = {"zip": None, "html": None}
+    try:
+        allure = generate_allure(results, meta, started_dt, stopped_dt)
+    except Exception:
+        pass
+    save_report_meta(report_name, results, project=project, mode=mode,
+                     per_flow=per_flow, created=stopped, kind="topic_compare",
+                     allure_zip=allure.get("zip"), allure_html=allure.get("html"))
+    return {"report": report_name, "allure_zip": allure.get("zip"), "allure_html": allure.get("html")}
+
+@bp.route("/api/topics/compare/start", methods=["POST"])
+def api_topics_compare_start():
+    if topic_compare_state["running"]:
+        return jsonify({"error": "Compare already running"}), 400
+    data    = request.get_json(force=True) or {}
+    cfg     = load_config()
     host    = (data.get("host") or cfg.get("topic_host_b") or cfg.get("topic_host") or "").strip()
     count   = int(data.get("count") or cfg.get("topic_count") or 50)
     mode    = data.get("mode", "full")
-    gsource = data.get("golden_source") or "kowl"   # kowl | isd | db
+    gsource = data.get("golden_source") or "kowl"
+    prefix  = (data.get("prefix") or cfg.get("topic_prefix_b") or "").strip()
+    topics  = apply_prefix(_topics_from_request(data), prefix)
     if not host:
         return jsonify({"error": "No Kowl host configured."}), 400
+    if not topics:
+        return jsonify({"error": "No topics configured."}), 400
     if gsource == "kowl" and not list_topic_baselines():
-        return jsonify({"error": "No kowl baseline stored yet. Capture one in Capture → From Kowl first."}), 400
-    try:
-        results = compare_topics(host, _topics_from_request(data), count, mode=mode, golden_source=gsource)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    return jsonify({"results": results})
+        return jsonify({"error": "No kowl baseline stored yet. Capture one first."}), 400
+    topic_compare_state["running"]   = True
+    topic_compare_state["log_queue"] = queue.Queue()
+    t = threading.Thread(target=_compare_topics_thread,
+                         args=(host, topics, count, mode, gsource, topic_compare_state), daemon=True)
+    topic_compare_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True, "total": len(topics)})
+
+@bp.route("/api/topics/compare/stream")
+def api_topics_compare_stream():
+    def generate():
+        while True:
+            try:
+                item = topic_compare_state["log_queue"].get(timeout=30)
+                yield f"data: {json.dumps(item)}\n\n"
+                if item.get("type") in ("done", "error"):
+                    break
+            except queue.Empty:
+                yield 'data: {"type":"ping"}\n\n'
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @bp.route("/api/compare/json", methods=["POST"])
 def api_compare_json():
