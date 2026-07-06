@@ -2,13 +2,11 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from pathlib import Path
-
 from deepdiff import DeepDiff  # type: ignore[import]
 
 from core.config import *
 from core.diffing import *
-from core.golden import load_golden, save_golden, current_project, golden_path, golden_root
+from core.golden import load_golden, save_golden, golden_path, golden_root
 from core.state import kowl_capture_state
 
 # websocket-client is only needed for Kowl topic streaming; keep it optional.
@@ -51,58 +49,133 @@ def topic_short(topic):
     parts = topic.split(".")
     return parts[-2] if len(parts) >= 2 else topic
 
+def _sr_path(sr):
+    """Recursively build a type path for one serviceRequest node.
+    e.g. PICK → 'PICK'
+         PICK containing [PICK_LINE] → 'PICK/PICK_LINE'
+         PICK containing [PICK_LINE containing [PICK_LINE]] → 'PICK/PICK_LINE/PICK_LINE'
+    """
+    if not isinstance(sr, dict):
+        return ""
+    top = (sr.get("type") or "").upper()
+    nested = sr.get("serviceRequests")
+    if nested and isinstance(nested, list):
+        child_paths = [_sr_path(n) for n in nested if isinstance(n, dict)]
+        child_paths = [p for p in child_paths if p]
+        if child_paths:
+            # Use the first child path to represent the chain (children should be homogeneous)
+            return f"{top}/{child_paths[0]}"
+    return top
+
+def sr_type_path(env):
+    """Derive a type-hierarchy signature from serviceRequests in the payload.
+
+    Recursively walks serviceRequests so any depth is captured:
+      PICK                      → 'PICK'
+      PICK → PICK_LINE          → 'PICK/PICK_LINE'
+      PICK → PICK_LINE → PICK_LINE → 'PICK/PICK_LINE/PICK_LINE'
+    Multiple distinct top-level paths are joined with '+'.
+    Returns '' for topics that have no serviceRequests field.
+    """
+    payload = env.get("payload") if isinstance(env.get("payload"), dict) else {}
+    srs = payload.get("serviceRequests")
+    if not srs or not isinstance(srs, list):
+        return ""
+    seen, paths = [], []
+    for sr in srs:
+        path = _sr_path(sr)
+        if path and path not in seen:
+            seen.append(path)
+            paths.append(path)
+    return "+".join(paths)
+
 def topic_notif_key(env, label, topic):
-    """Pairing key across setups: {LABEL}__{name}__{state}."""
+    """Pairing key across setups: {LABEL}__{name}__{state}[__{sr_type_path}]."""
     name  = env.get("name") or topic_short(topic)
     inner = env.get("payload") if isinstance(env.get("payload"), dict) else {}
     state = (inner.get("state") or env.get("state")
              or inner.get("status") or env.get("status") or "all")
-    return f"{label}__{name}__{str(state).strip().lower()}"
+    key = f"{label}__{name}__{str(state).strip().lower()}"
+    sr_path = sr_type_path(env)
+    if sr_path:
+        key += f"__{sr_path}"
+    return key
+
+def _normalise_host(host):
+    """Return (http_base_url, ws_url_base, is_tls) from a host string that may or may not have a scheme."""
+    host = host.strip().rstrip("/")
+    if host.startswith("https://"):
+        return host, "wss://" + host[len("https://"):], True
+    if host.startswith("http://"):
+        return host, "ws://" + host[len("http://"):], False
+    # bare host:port — assume plain HTTP/WS (Kowl default, no TLS)
+    return "http://" + host, "ws://" + host, False
+
 
 def fetch_topic_messages(host, topic, count=50, start_offset=-1,
-                         idle_timeout=8, hard_timeout=20):
+                         idle_timeout=5, hard_timeout=20):
     """
-    Consume up to `count` messages from a Kowl topic over its WebSocket API.
+    Consume up to `count` messages from a Kowl/Redpanda-Console topic via WebSocket.
+
+    Kowl / Redpanda Console serves /api/topics/{topic}/messages as a WebSocket-only
+    endpoint.  Params go in the URL query string; the server streams back JSON frames.
+
     start_offset: -1 = newest (recent N), -2 = oldest.
-    Returns the raw Kowl `message` objects (with .value.payload).
+    Returns the raw message objects (with .value.payload).
     """
     if websocket is None:
         raise RuntimeError("websocket-client not installed. Run: pip install websocket-client")
-    # Strip scheme and trailing slash — config may store a full https:// URL.
-    ws_scheme = "wss" if host.startswith("https") else "ws"
-    bare_host = host.rstrip("/")
-    for prefix in ("https://", "http://"):
-        if bare_host.startswith(prefix):
-            bare_host = bare_host[len(prefix):]
-            break
-    url = f"{ws_scheme}://{bare_host}/api/topics/{topic}/messages"
+
+    _, ws_base, is_tls = _normalise_host(host)
+
+    # No query params — the server upgrades first, then waits for a JSON request
+    # body sent as the first WebSocket message (ListMessagesRequest).
+    ws_url = f"{ws_base}/api/topics/{topic}/messages"
+    offset_num = -1 if start_offset == -1 else (-2 if start_offset == -2 else int(start_offset))
+    req_body = {
+        "topicName": topic,
+        "startOffset": offset_num,
+        "startTimestamp": 0,
+        "partitionId": -1,
+        "maxResults": int(count),
+        "filterInterpreterCode": "",
+    }
+
+    return _fetch_topic_messages_ws(ws_url, ws_base, is_tls, count,
+                                    idle_timeout, hard_timeout, req_body)
+
+
+def _fetch_topic_messages_ws(ws_url, ws_base, is_tls, count,
+                              idle_timeout, hard_timeout, req_body):
+    """WebSocket transport — request sent as a JSON frame after connecting (Redpanda Console / Kowl)."""
     import ssl as _ssl
-    sslopt = {"cert_reqs": _ssl.CERT_NONE} if ws_scheme == "wss" else {}
+    bare_host = ws_base.split("://", 1)[-1]
+    sslopt = {"cert_reqs": _ssl.CERT_NONE} if is_tls else {}
     ws = websocket.create_connection(
-        url,
+        ws_url,
         timeout=idle_timeout,
         sslopt=sslopt,
         header={"Origin": f"https://{bare_host}"},
     )
+    ws.send(json.dumps(req_body))
     ws.settimeout(idle_timeout)
-    req = {
-        "topicName": topic, "startOffset": int(start_offset), "startTimestamp": 0,
-        "partitionId": -1, "maxResults": int(count),
-        "filterInterpreterCode": "", "enterprise": None,
-    }
-    ws.send(json.dumps(req))
     msgs, start = [], time.time()
+    # After receiving at least one message, a short silence means the burst is done.
+    post_burst_timeout = 2  # seconds to wait after first message before giving up
     try:
         while time.time() - start < hard_timeout:
+            # Shrink the socket timeout once we have messages — don't wait the full idle window
+            if msgs:
+                ws.settimeout(post_burst_timeout)
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
-                break  # idle timeout -> no more data
+                break  # silence after burst = done
             except websocket.WebSocketConnectionClosedException:
-                break  # server closed cleanly
+                break
             except Exception as _e:
                 if msgs:
-                    break  # partial data received — treat as done
+                    break
                 raise RuntimeError(f"WebSocket error: {_e}") from _e
             if not raw:
                 break
@@ -116,7 +189,6 @@ def fetch_topic_messages(host, topic, count=50, start_offset=-1,
                 break
             elif t == "error":
                 raise RuntimeError(o.get("message") or "Kowl returned an error")
-            # "phase" / "progress" messages are progress updates — keep reading
     finally:
         try:
             ws.close()
@@ -148,8 +220,15 @@ def load_topic_baseline(key):
 
 def list_topic_baselines():
     root = golden_root() / "kowl"
-    keys = {p.stem for p in root.rglob("*.json")} if root.exists() else set()
-    keys |= {p.stem for p in TOPIC_DIR.glob("*.json")}  # include any legacy baselines
+    seen, keys = set(), []
+    if root.exists():
+        for p in root.rglob("*.json"):
+            rel = str(p.relative_to(root).with_suffix(""))
+            if rel not in seen:
+                seen.add(rel); keys.append(rel)
+    for p in TOPIC_DIR.glob("*.json"):  # legacy flat store
+        if p.stem not in seen:
+            seen.add(p.stem); keys.append(p.stem)
     return sorted(keys)
 
 def capture_topics(host, topics, count):
@@ -177,6 +256,10 @@ def capture_topics_thread(host, topics, count, state):
     saved, errors = {}, []
     total = len(topics)
     for i, spec in enumerate(topics, 1):
+        if not state.get("running", True):
+            log.put({"type": "error", "msg": "Stopped by user."})
+            state["running"] = False
+            return
         label, topic = spec["label"], spec["topic"]
         log.put({"type": "progress", "topic": topic, "label": label,
                  "current": i, "total": total,
@@ -302,30 +385,57 @@ def _fetch_with_timeout(host, topic, count):
     except FuturesTimeoutError:
         raise RuntimeError(f"Timed out after {_FETCH_TIMEOUT}s — topic may not exist on this cluster")
 
+_STATUS_RANK = {"PASS": 0, "FAIL": 1, "ERROR": 2, "NO GOLDEN": 3}
+
 def compare_topics(host, topics, count, mode="full", golden_source="kowl", state=None):
     """Fetch Kowl topics and diff each message against the chosen golden source.
-    If state dict with log_queue is provided, emits per-topic progress events."""
-    results, total = [], len(topics)
-    log = state["log_queue"] if state else None
-    for i, spec in enumerate(topics, 1):
-        label, topic = spec["label"], spec["topic"]
+    If state dict with log_queue is provided, emits per-topic progress events.
+
+    When the same physical topic appears under multiple labels (e.g. 'service-request-cancel'
+    listed twice with different label names), every label is tried for each message and only
+    the best result per (partition, offset) is kept — PASS beats FAIL beats NO GOLDEN.
+    This prevents duplicate rows when the topic config has overlapping entries.
+    """
+    # Group specs by physical topic name so we fetch each topic once and try all labels.
+    from collections import defaultdict
+    by_topic = defaultdict(list)
+    for spec in topics:
+        by_topic[spec["topic"]].append(spec["label"])
+
+    results = []
+    total   = len(by_topic)
+    log     = state["log_queue"] if state else None
+
+    for i, (topic, labels) in enumerate(by_topic.items(), 1):
+        if state and not state.get("running", True):
+            break  # user pressed Stop
         if log:
             log.put({"type": "progress", "topic": topic, "current": i, "total": total,
                      "msg": f"[{i}/{total}] Fetching: {topic} (up to {count} msgs, timeout 20s)…"})
         try:
-            topic_results = []
-            for msg in _fetch_with_timeout(host, topic, count):
+            msgs = _fetch_with_timeout(host, topic, count)
+
+            # best result per (partition, offset) across all labels
+            best: dict = {}  # row_id -> result dict
+
+            for msg in msgs:
                 env = message_envelope(msg)
                 if env is None:
                     continue
                 row_id = f"p{msg.get('partitionID','?')}@{msg.get('offset','?')}"
-                try:
-                    r = compare_kowl_env(env, label, topic, mode, golden_source, row_id)
-                    topic_results.append(r)
-                except Exception as e:
-                    topic_results.append({"db_id": row_id, "create_time": topic_short(topic),
-                                          "key": "ERROR", "ext_id": "", "status": "ERROR",
-                                          "findings": [{"type": "exception", "path": "", "detail": str(e)}]})
+
+                for label in labels:
+                    try:
+                        r = compare_kowl_env(env, label, topic, mode, golden_source, row_id)
+                    except Exception as e:
+                        r = {"db_id": row_id, "create_time": topic_short(topic),
+                             "key": "ERROR", "ext_id": "", "flow": label, "status": "ERROR",
+                             "findings": [{"type": "exception", "path": "", "detail": str(e)}]}
+                    prev = best.get(row_id)
+                    if prev is None or _STATUS_RANK.get(r["status"], 9) < _STATUS_RANK.get(prev["status"], 9):
+                        best[row_id] = r
+
+            topic_results = list(best.values())
             results.extend(topic_results)
             if log:
                 passes = sum(1 for r in topic_results if r["status"] == "PASS")

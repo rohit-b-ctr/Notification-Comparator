@@ -1,22 +1,22 @@
 {
-  "ssh_host": "172.29.32.95",
+  "ssh_host": "172.29.28.99",
   "ssh_port": 22,
   "ssh_user": "rohit_b_ctr_greyorange_com",
-  "db_host": "10.57.117.116",
+  "db_host": "10.57.117.79",
   "db_port": 5432,
   "db_name": "wms_notification",
   "db_user": "postgres",
   "db_table": "subscriber_history",
-  "subscriber_put": 219,
-  "subscriber_pick": 220,
+  "subscriber_put": 260,
+  "subscriber_pick": 261,
   "subscriber_audit": null,
   "subscriber_other": null,
   "poll_interval": 3,
-  "project": "Apotek_Prod",
+  "project": "Columbus",
   "topic_host": "http://192.168.234.12:9003/",
-  "topic_host_b": "https://stpfunction-kowl.greymatter.greyorange.com/",
+  "topic_host_b": "https://stpbulk-kowl.greymatter.greyorange.com/",
   "topic_prefix": "aph",
-  "topic_prefix_b": "stpfunction-apotekreg",
+  "topic_prefix_b": "stpbulk-aphrelay",
   "topic_count": 50,
   "topics": [
     {
@@ -103,5 +103,6 @@
       "label": "ForeCast API",
       "topic": "inventory.forecast.data"
     }
-  ]
+  ],
+  "secrets_ready": true
 }

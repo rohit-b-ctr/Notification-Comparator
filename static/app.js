@@ -1,12 +1,31 @@
+// ── Theme ────────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const light = document.body.classList.toggle('light');
+  document.getElementById('theme-toggle').textContent = light ? '☀️' : '🌙';
+  localStorage.setItem('theme', light ? 'light' : 'dark');
+}
+(function () {
+  if (localStorage.getItem('theme') === 'light') {
+    document.body.classList.add('light');
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('theme-toggle');
+      if (btn) btn.textContent = '☀️';
+    });
+  }
+})();
+
 // ── Navigation ──────────────────────────────────────────────────────────────
+const _NAV_PAGE_MAP = {
+  dashboard: 'dashboard', capture: 'capture golden', compare: 'compare',
+  watch: 'watch (live)', goldens: 'golden snapshots', config: 'config',
+};
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
+  const label = _NAV_PAGE_MAP[name] || name;
   document.querySelectorAll('.nav-item').forEach(n => {
-    if (n.textContent.toLowerCase().includes(name === 'dashboard' ? 'dashboard'
-        : name === 'capture' ? 'capture' : name === 'compare' ? 'compare'
-        : name === 'watch' ? 'watch' : name === 'config' ? 'config' : 'golden'))
+    if (n.querySelector('.nav-label')?.textContent.toLowerCase().trim() === label)
       n.classList.add('active');
   });
   if (name === 'goldens' || name === 'dashboard') loadGoldens();
@@ -89,7 +108,7 @@ function renderResultRow(r, tbodyId) {
 
   const jsonBlock = r.payload ? `
         <div style="font-size:11px;font-weight:700;color:#64748b;margin:${diffBlock ? '12px' : '0'} 0 6px">
-          PAYLOAD JSON <span style="font-weight:400;color:#475569">— <span style="color:#86efac">green = matches golden</span>, <span style="color:#fca5a5">red = schema mismatch</span></span>
+          PAYLOAD JSON <span style="font-weight:400;color:#475569">— <span style="color:var(--log-pass,#86efac)">green = matches golden</span>, <span style="color:var(--log-fail,#fca5a5)">red = schema mismatch</span></span>
         </div>
         <pre class="payload-json">${colorJsonLines(r.payload, r.findings)}</pre>` : '';
 
@@ -284,12 +303,15 @@ function updateFullRunCounters(results) {
 
 async function startFullRun() {
   const interval = document.getElementById('fullrun-interval').value;
-  const res = await fetch('/api/full-run/start', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ interval, mode: modeState.fullrun, golden_source: fullRunGolden,
-                           data_source: fullRunGolden === 'isd' ? fullRunIsdData : undefined })
-  });
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('/api/full-run/start', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ interval, mode: modeState.fullrun, golden_source: fullRunGolden,
+                             data_source: fullRunGolden === 'isd' ? fullRunIsdData : undefined })
+    });
+    data = await res.json();
+  } catch (e) { alert('Full Run failed to start: ' + e); return; }
   if (!data.ok) { alert(data.error); return; }
 
   fullRunResults = [];
@@ -493,7 +515,8 @@ async function toggleGoldenJson(id, key, btn) {
       box.innerHTML = '<pre class="payload-json">' + escapeHtml(JSON.stringify(data, null, 2)) + '</pre>';
       box.dataset.loaded = '1';
     } catch (e) {
-      box.innerHTML = '<div style="padding:8px;color:#fca5a5;font-size:12px">Failed to load.</div>';
+      box.innerHTML = '<div style="padding:8px;color:var(--log-fail,#fca5a5);font-size:12px">Failed to load.</div>';
+      box.dataset.loaded = '1'; // prevent infinite retry on error
     }
   }
 }
@@ -567,11 +590,11 @@ async function uploadISD() {
     const body = document.getElementById('cap-isd-result-body');
     card.style.display = 'block';
     if (data.error) {
-      body.innerHTML = '<div style="color:#fca5a5">❌ ' + data.error + '</div>';
+      body.innerHTML = '<div style="color:var(--log-fail,#fca5a5)">❌ ' + data.error + '</div>';
     } else {
       const unparse = data.blocks_unparseable || 0;
       body.innerHTML =
-        `<div style="font-size:12px;color:#86efac;margin-bottom:6px">✅ Read ${data.pages} page(s); saved ${data.keys} golden(s) under project "${data.project || '(none)'}".</div>` +
+        `<div style="font-size:12px;color:var(--log-pass,#86efac);margin-bottom:6px">✅ Read ${data.pages} page(s); saved ${data.keys} golden(s) under project "${data.project || '(none)'}".</div>` +
         `<div style="font-size:11px;color:#64748b;margin-bottom:10px">JSON blocks found: ${data.blocks_seen} · parsed: ${data.blocks_parsed}${unparse ? ` · <span style="color:#fcd34d">unparseable: ${unparse}</span>` : ''}</div>` +
         (data.saved.length
           ? data.saved.map(s => `<div class="golden-item"><span class="golden-name">${s.key}</span></div>`).join('')
@@ -659,11 +682,11 @@ async function doCapture() {
     el.style.display = 'block';
     if (data.ok) {
       body.innerHTML = `
-        <p style="color:#86efac;margin-bottom:10px">✅ Captured ${data.saved.length} golden snapshot(s) from ${data.total_fetched} notifications.</p>
+        <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} golden snapshot(s) from ${data.total_fetched} notifications.</p>
         ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
       `;
     } else {
-      body.innerHTML = `<p style="color:#fca5a5">❌ ${data.error}</p>`;
+      body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</p>`;
     }
   } catch(e) {
     alert('Error: ' + e.message);
@@ -720,7 +743,7 @@ async function startLiveCapture() {
         const el = document.getElementById('cap-live-result');
         el.style.display = 'block';
         document.getElementById('cap-live-result-body').innerHTML =
-          `<p style="color:#86efac;margin-bottom:10px">✅ ${item.saved.length} golden snapshot(s) saved.</p>` +
+          `<p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ ${item.saved.length} golden snapshot(s) saved.</p>` +
           item.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('');
       }
     }
@@ -823,11 +846,113 @@ function beautifyJson(id) {
   const raw = ta.value.trim();
   if (!raw) return;
   try {
-    ta.value = JSON.stringify(JSON.parse(raw), null, 2);
+    const parsed = JSON.parse(raw);
+    ta.value = JSON.stringify(parsed, null, 2);
     jsonStatus(id, '✓ valid JSON, beautified', true);
+    // Render interactive tree
+    const treeBox = document.getElementById(id + '-tree');
+    if (treeBox) {
+      treeBox.innerHTML = '';
+      treeBox.appendChild(buildJsonTree(parsed));
+      treeBox.style.display = 'block';
+      ta.style.display = 'none';
+    }
   } catch (e) {
     jsonStatus(id, '✗ invalid JSON: ' + e.message, false);
   }
+}
+
+function collapseJsonTree(id) {
+  const treeBox = document.getElementById(id + '-tree');
+  const ta = document.getElementById(id);
+  if (treeBox) treeBox.style.display = 'none';
+  if (ta) ta.style.display = '';
+}
+
+function buildJsonTree(value, key) {
+  const wrap = document.createElement('div');
+  wrap.className = 'jt-node';
+
+  if (value === null || typeof value !== 'object') {
+    // Leaf
+    const leaf = document.createElement('span');
+    leaf.className = 'jt-leaf';
+    if (key !== undefined) {
+      const k = document.createElement('span'); k.className = 'jt-key'; k.textContent = JSON.stringify(key) + ': ';
+      leaf.appendChild(k);
+    }
+    const v = document.createElement('span');
+    v.className = typeof value === 'string' ? 'jt-str' : typeof value === 'number' ? 'jt-num' : typeof value === 'boolean' ? 'jt-bool' : 'jt-null';
+    v.textContent = JSON.stringify(value);
+    leaf.appendChild(v);
+    wrap.appendChild(leaf);
+    return wrap;
+  }
+
+  const isArr = Array.isArray(value);
+  const entries = isArr ? value.map((v, i) => [i, v]) : Object.entries(value);
+  const count = entries.length;
+  const open = count <= 5; // auto-expand small objects
+
+  // Toggle button
+  const toggle = document.createElement('button');
+  toggle.className = 'jt-toggle';
+  toggle.textContent = open ? '−' : '+';
+
+  // Header line
+  const header = document.createElement('div');
+  header.className = 'jt-header';
+  header.appendChild(toggle);
+
+  if (key !== undefined) {
+    const k = document.createElement('span'); k.className = 'jt-key'; k.textContent = JSON.stringify(key) + ': ';
+    header.appendChild(k);
+  }
+  const bracket = document.createElement('span');
+  bracket.className = 'jt-bracket';
+  bracket.textContent = isArr ? '[' : '{';
+  header.appendChild(bracket);
+
+  const summary = document.createElement('span');
+  summary.className = 'jt-summary';
+  summary.textContent = ` ${count} ${isArr ? 'item' : 'key'}${count !== 1 ? 's' : ''} `;
+  header.appendChild(summary);
+
+  const closeBracket = document.createElement('span');
+  closeBracket.className = 'jt-bracket';
+  closeBracket.textContent = isArr ? ']' : '}';
+  header.appendChild(closeBracket);
+
+  wrap.appendChild(header);
+
+  // Children container
+  const children = document.createElement('div');
+  children.className = 'jt-children';
+  children.style.display = open ? '' : 'none';
+  summary.style.display = open ? 'none' : '';
+  closeBracket.style.display = open ? 'none' : '';
+
+  for (const [k, v] of entries) {
+    children.appendChild(buildJsonTree(v, isArr ? undefined : k));
+  }
+
+  // Closing bracket on its own line
+  const close = document.createElement('div');
+  close.className = 'jt-close';
+  close.textContent = isArr ? ']' : '}';
+  children.appendChild(close);
+
+  wrap.appendChild(children);
+
+  toggle.addEventListener('click', () => {
+    const expanded = children.style.display !== 'none';
+    children.style.display = expanded ? 'none' : '';
+    toggle.textContent = expanded ? '+' : '−';
+    summary.style.display = expanded ? '' : 'none';
+    closeBracket.style.display = expanded ? '' : 'none';
+  });
+
+  return wrap;
 }
 
 function minifyJson(id) {
@@ -1035,15 +1160,18 @@ async function startWatch() {
   const subscriber = document.getElementById('watch-subscriber').value;
   const interval   = document.getElementById('watch-interval').value;
 
-  const res = await fetch('/api/watch/start', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({
-      subscriber, interval, mode: modeState.watch, golden_source: watchGolden,
-      data_source: watchGolden === 'isd' ? watchIsdData : undefined,
-      ext_id: watchFetchMode === 'extid' ? document.getElementById('watch-extid').value.trim() : null
-    })
-  });
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('/api/watch/start', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        subscriber, interval, mode: modeState.watch, golden_source: watchGolden,
+        data_source: watchGolden === 'isd' ? watchIsdData : undefined,
+        ext_id: watchFetchMode === 'extid' ? document.getElementById('watch-extid').value.trim() : null
+      })
+    });
+    data = await res.json();
+  } catch (e) { alert('Watch failed to start: ' + e); return; }
   if (!data.ok) { alert(data.error); return; }
 
   watchResults = [];
@@ -1190,8 +1318,11 @@ function selectFlowType(prefix, type) {
 
 // ── Config ───────────────────────────────────────────────────────────────────
 async function loadConfig() {
-  const res = await fetch('/api/config');
-  const cfg = await res.json();
+  let cfg;
+  try {
+    const res = await fetch('/api/config');
+    cfg = await res.json();
+  } catch (e) { console.error('Failed to load config:', e); return; }
   // non-secret fields from disk
   document.getElementById('cfg-ssh-host').value  = cfg.ssh_host  || '';
   document.getElementById('cfg-ssh-port').value  = cfg.ssh_port  || 22;
@@ -1385,6 +1516,89 @@ async function testConnection() {
   btn.disabled = false;
 }
 
+async function saveProjectDefaults() {
+  const btn     = document.getElementById('cfg-project-save-btn');
+  const input   = document.getElementById('cfg-project');
+  const project = input.value.trim();
+  if (!project) {
+    input.focus();
+    input.style.borderColor = '#f43f5e';
+    input.style.boxShadow   = '0 0 0 3px rgba(244,63,94,.2)';
+    btn.textContent = '❌ Project name is required';
+    setTimeout(() => {
+      input.style.borderColor = '';
+      input.style.boxShadow   = '';
+      btn.textContent = '💾 Save';
+    }, 2500);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res  = await fetch('/api/config');
+    const cfg  = await res.json();
+    cfg.project      = project;
+    cfg.poll_interval = parseInt(document.getElementById('cfg-poll').value) || cfg.poll_interval;
+    const r = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg) });
+    const d = await r.json();
+    btn.textContent = d.ok ? '✓ Saved' : '❌ Failed';
+    setTimeout(() => { btn.textContent = '💾 Save'; btn.disabled = false; }, 2000);
+  } catch(e) {
+    btn.textContent = '❌ Error';
+    setTimeout(() => { btn.textContent = '💾 Save'; btn.disabled = false; }, 2000);
+  }
+}
+
+async function saveKowlConfig() {
+  const btn    = document.getElementById('cfg-kowl-save-btn');
+  const status = document.getElementById('cfg-kowl-status');
+  btn.disabled = true;
+  const payload = {
+    topic_host:     document.getElementById('cfg-topic-host').value.trim(),
+    topic_host_b:   document.getElementById('cfg-topic-host-b').value.trim(),
+    topic_prefix:   document.getElementById('cfg-topic-prefix').value.trim(),
+    topic_prefix_b: document.getElementById('cfg-topic-prefix-b').value.trim(),
+    topic_count:    document.getElementById('cfg-topic-count').value || 50,
+    topics:         parseTopicsTextarea(document.getElementById('cfg-topics').value),
+  };
+  const res  = await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  btn.disabled = false;
+  status.textContent = data.ok ? '✅ Saved!' : '❌ ' + data.error;
+  status.style.color = data.ok ? '#86efac' : '#fca5a5';
+  setTimeout(() => status.textContent = '', 3000);
+  if (data.ok) {
+    // Keep in-memory topicCfg in sync so compare/capture pick up changes immediately
+    topicCfg = {
+      host:     payload.topic_host,
+      host_b:   payload.topic_host_b,
+      prefix:   payload.topic_prefix,
+      prefix_b: payload.topic_prefix_b,
+      count:    parseInt(payload.topic_count) || 50,
+      topics:   payload.topics,
+    };
+  }
+  return data.ok;
+}
+
+async function testKowlConnection() {
+  const btn    = document.getElementById('cfg-kowl-test-btn');
+  const status = document.getElementById('cfg-kowl-status');
+  const saved  = await saveKowlConfig();
+  if (!saved) return;
+  btn.disabled = true;
+  status.textContent = '🔄 Testing Kowl...';
+  status.style.color = '#93c5fd';
+  const res  = await fetch('/api/config/test-kowl', {method:'POST'});
+  const data = await res.json();
+  status.textContent = data.msg;
+  status.style.color = data.ok ? '#86efac' : '#fca5a5';
+  btn.disabled = false;
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadGoldens();
 loadConfig();
@@ -1430,7 +1644,7 @@ async function initTopics() {
   document.getElementById('tc-cap-topics').innerHTML =
     topicCfg.topics.length
       ? topicCfg.topics.map(t => `<div style="padding:3px 0">• <b>${t.label}</b> — ${t.topic}</div>`).join('')
-      : '<span style="color:#fca5a5">No topics configured. Add them on the Config tab.</span>';
+      : '<span style="color:var(--log-fail,#fca5a5)">No topics configured. Add them on the Config tab.</span>';
   loadTopicBaselines();
   topicsInited = true;
 }
@@ -1506,18 +1720,30 @@ async function stopKowlCapture() {
   document.getElementById('kc-status').textContent = 'Stopping...';
 }
 
+let _tcCaptureSSE = null;
+
+function stopCaptureTopics() {
+  if (_tcCaptureSSE) { _tcCaptureSSE.close(); _tcCaptureSSE = null; }
+  fetch('/api/topics/capture/stop', { method: 'POST' }).catch(() => {});
+  document.getElementById('tc-cap-btn').disabled = false;
+  document.getElementById('tc-cap-btn').textContent = '📥 Capture Baseline (snapshot)';
+  document.getElementById('tc-cap-stop-btn').style.display = 'none';
+}
+
 async function captureTopics() {
   const btn  = document.getElementById('tc-cap-btn');
+  const stopBtn = document.getElementById('tc-cap-stop-btn');
   const host = document.getElementById('tc-cap-host').value.trim();
   const count = parseInt(document.getElementById('tc-cap-count').value) || 50;
   if (!host) { alert('Enter the baseline Kowl host:port'); return; }
   if (!topicCfg.topics.length) { alert('No topics configured. Add them on the Config tab.'); return; }
   btn.disabled = true; btn.textContent = '⏳ Capturing...';
+  stopBtn.style.display = 'inline-flex';
 
   const card = document.getElementById('tc-cap-result');
   const body = document.getElementById('tc-cap-result-body');
   card.style.display = 'block';
-  body.innerHTML = '<div style="font-size:12px;color:#94a3b8">Starting capture...</div>';
+  body.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Starting capture...</div>';
 
   try {
     const res = await fetch('/api/topics/capture/start', {
@@ -1525,16 +1751,17 @@ async function captureTopics() {
       body: JSON.stringify({host, count, prefix: topicCfg.prefix, topics: topicCfg.topics})
     });
     const start = await res.json();
-    if (start.error) { alert('Capture failed: ' + start.error); btn.disabled = false; btn.textContent = '📥 Capture Baseline'; return; }
+    if (start.error) { alert('Capture failed: ' + start.error); btn.disabled = false; btn.textContent = '📥 Capture Baseline (snapshot)'; stopBtn.style.display = 'none'; return; }
 
     const progressLines = {};  // topic -> element id
     const progressBar = document.createElement('div');
-    progressBar.style.cssText = 'font-size:12px;color:#94a3b8;margin-bottom:8px';
+    progressBar.style.cssText = 'font-size:12px;color:var(--text-muted);margin-bottom:8px';
     body.innerHTML = '';
     body.appendChild(progressBar);
 
     await new Promise((resolve) => {
       const sse = new EventSource('/api/topics/capture/stream');
+      _tcCaptureSSE = sse;
       sse.onmessage = (e) => {
         const item = JSON.parse(e.data);
         if (item.type === 'ping') return;
@@ -1543,25 +1770,36 @@ async function captureTopics() {
           progressBar.textContent = `⏳ [${item.current}/${item.total}] Fetching: ${item.topic}`;
         } else if (item.type === 'ok') {
           const div = document.createElement('div');
-          div.style.cssText = 'font-family:monospace;font-size:11px;color:#86efac;padding:1px 0';
+          div.style.cssText = 'font-family:monospace;font-size:11px;color:var(--log-pass,#86efac);padding:1px 0';
           div.textContent = item.msg;
           body.insertBefore(div, progressBar);
         } else if (item.type === 'topic_error') {
           const div = document.createElement('div');
-          div.style.cssText = 'font-family:monospace;font-size:11px;color:#fca5a5;padding:1px 0';
+          div.style.cssText = 'font-family:monospace;font-size:11px;color:var(--log-fail,#fca5a5);padding:1px 0';
           div.textContent = item.msg;
           body.insertBefore(div, progressBar);
         } else if (item.type === 'done') {
           sse.close();
+          _tcCaptureSSE = null;
+          stopBtn.style.display = 'none';
           progressBar.remove();
           // Summary
           const summary = document.createElement('div');
           summary.style.cssText = 'font-size:12px;margin-top:8px;padding-top:8px;border-top:1px solid #334155';
           summary.innerHTML = item.keys
-            ? `<span style="color:#86efac">✅ Done — ${item.keys} key(s) from ${item.messages} message(s)</span>`
+            ? `<span style="color:var(--log-pass,#86efac)">✅ Done — ${item.keys} key(s) from ${item.messages} message(s)</span>`
             : `<span style="color:#fbbf24">⚠️ No messages captured — topics may be empty</span>`;
           body.appendChild(summary);
           loadTopicBaselines();
+          resolve();
+        } else if (item.type === 'error') {
+          sse.close();
+          _tcCaptureSSE = null;
+          stopBtn.style.display = 'none';
+          const summary = document.createElement('div');
+          summary.style.cssText = 'font-size:12px;margin-top:8px;padding-top:8px;border-top:1px solid #334155;color:#fbbf24';
+          summary.textContent = '⏹ ' + (item.msg || 'Stopped.');
+          body.appendChild(summary);
           resolve();
         }
       };
@@ -1571,20 +1809,34 @@ async function captureTopics() {
   btn.disabled = false; btn.textContent = '📥 Capture Baseline';
 }
 
+let _tcCompareSSE = null;
+
+function stopCompareTopics() {
+  if (_tcCompareSSE) { _tcCompareSSE.close(); _tcCompareSSE = null; }
+  fetch('/api/topics/compare/stop', { method: 'POST' }).catch(() => {});
+  document.getElementById('tc-cmp-btn').disabled = false;
+  document.getElementById('tc-cmp-btn').textContent = '🔍 Compare';
+  document.getElementById('tc-stop-btn').style.display = 'none';
+  const progressEl = document.getElementById('tc-cmp-progress');
+  if (progressEl) progressEl.textContent = '⏹ Stopped by user.';
+}
+
 async function compareTopics() {
-  const btn  = document.getElementById('tc-cmp-btn');
+  const btn      = document.getElementById('tc-cmp-btn');
+  const stopBtn  = document.getElementById('tc-stop-btn');
   const host = document.getElementById('tc-cmp-host').value.trim();
   const count = parseInt(document.getElementById('tc-cmp-count').value) || 50;
   if (!host) { alert('Enter the target Kowl host:port'); return; }
   if (!topicCfg.topics.length) { alert('No topics configured. Add them on the Config tab.'); return; }
   btn.disabled = true; btn.textContent = '⏳ Comparing...';
+  stopBtn.style.display = 'inline-flex';
 
   // Show progress area
   const resultCard = document.getElementById('tc-cmp-result');
   const body = document.getElementById('tc-results-body');
   resultCard.style.display = 'block';
   document.getElementById('tc-summary').style.display = 'none';
-  body.innerHTML = '<tr><td colspan="6"><div style="font-size:12px;color:#94a3b8;padding:8px">Starting compare...</div></td></tr>';
+  body.innerHTML = '<tr><td colspan="6"><div style="font-size:12px;padding:8px">Starting compare...</div></td></tr>';
 
   try {
     const res = await fetch('/api/topics/compare/start', {
@@ -1593,16 +1845,17 @@ async function compareTopics() {
                             prefix: topicCfg.prefix_b, golden_source: topicGoldenSource})
     });
     const start = await res.json();
-    if (start.error) { alert('Compare failed: ' + start.error); btn.disabled = false; btn.textContent = '🔍 Compare'; return; }
+    if (start.error) { alert('Compare failed: ' + start.error); btn.disabled = false; btn.textContent = '🔍 Compare'; stopBtn.style.display = 'none'; return; }
 
     const progressRow = document.createElement('tr');
-    progressRow.innerHTML = '<td colspan="6"><div id="tc-cmp-progress" style="font-size:12px;color:#94a3b8;padding:8px">Fetching topics...</div></td>';
+    progressRow.innerHTML = '<td colspan="6"><div id="tc-cmp-progress" style="font-size:12px;padding:8px">Fetching topics...</div></td>';
     body.innerHTML = '';
     body.appendChild(progressRow);
     const progressEl = document.getElementById('tc-cmp-progress');
 
     await new Promise((resolve) => {
       const sse = new EventSource('/api/topics/compare/stream');
+      _tcCompareSSE = sse;
       sse.onmessage = (e) => {
         const item = JSON.parse(e.data);
         if (item.type === 'ping') return;
@@ -1611,14 +1864,14 @@ async function compareTopics() {
           progressEl.textContent = `⏳ [${item.current}/${item.total}] Comparing: ${item.topic}`;
         } else if (item.type === 'ok') {
           const info = document.createElement('tr');
-          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:#86efac;padding:2px 8px">${item.msg}</div></td>`;
+          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:var(--log-pass,#22c55e);padding:2px 8px">${item.msg}</div></td>`;
           body.insertBefore(info, progressRow);
         } else if (item.type === 'topic_error') {
           const info = document.createElement('tr');
-          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:#fca5a5;padding:2px 8px">${item.msg}</div></td>`;
+          info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:var(--log-fail,#f87171);padding:2px 8px">${item.msg}</div></td>`;
           body.insertBefore(info, progressRow);
         } else if (item.type === 'done') {
-          sse.close();
+          sse.close(); _tcCompareSSE = null;
           progressRow.remove();
           renderTopicResults(item.results || []);
           const dl = document.getElementById('tc-report-dl');
@@ -1631,15 +1884,16 @@ async function compareTopics() {
           if (typeof loadReports === 'function') loadReports();
           resolve();
         } else if (item.type === 'error') {
-          sse.close();
+          sse.close(); _tcCompareSSE = null;
           alert('Compare error: ' + item.msg);
           resolve();
         }
       };
-      sse.onerror = () => { sse.close(); resolve(); };
+      sse.onerror = () => { sse.close(); _tcCompareSSE = null; resolve(); };
     });
   } catch (e) { alert('Compare error: ' + e); }
   btn.disabled = false; btn.textContent = '🔍 Compare';
+  stopBtn.style.display = 'none';
 }
 
 function renderTopicResults(results) {
@@ -1750,20 +2004,20 @@ async function loadReports() {
       ? reports.map(rep => {
           const n = rep.name;
           const hasMeta = (rep.total !== undefined);
-          const kindIcon = rep.kind === 'full_run' ? '▶' : (rep.kind === 'run_all' ? '📅' : '🗒');
+          const kindIcon = rep.kind === 'full_run' ? '▶' : (rep.kind === 'run_all' ? '📅' : '⇄');
           const title = hasMeta
             ? `<b>${rep.project || '(none)'}</b> · ${rep.created || ''}`
             : `${n} <span style="color:#475569">· ${rep.created || ''}</span>`;
           const counts = hasMeta
             ? `<span style="margin-left:10px;font-size:11px">
-                 <span style="color:#86efac">✅ ${rep.pass}</span>
-                 <span style="color:#fca5a5;margin-left:6px">❌ ${rep.fail}</span>
-                 <span style="color:#94a3b8;margin-left:6px">/ ${rep.total}</span>
+                 <span style="color:var(--log-pass,#86efac)">✅ ${rep.pass}</span>
+                 <span style="color:var(--log-fail,#fca5a5);margin-left:6px">❌ ${rep.fail}</span>
+                 <span style="color:var(--text-muted);margin-left:6px">/ ${rep.total}</span>
                  ${rep.mode ? `<span class="badge badge-info" style="margin-left:8px">${rep.mode}</span>` : ''}
                </span>`
             : '';
           const allureBtns =
-            (rep.allure_html ? `<a class="btn-xs btn-xs-view" style="background:#14532d;color:#86efac" href="/api/allure-html/${rep.allure_html.replace('-html','')}/" target="_blank" title="Open Allure HTML report">📊 Allure</a>` : '') +
+            (rep.allure_html ? `<a class="btn-xs btn-xs-view" style="background:#14532d;color:var(--log-pass,#86efac)" href="/api/allure-html/${rep.allure_html.replace('-html','')}/" target="_blank" title="Open Allure HTML report">📊 Allure</a>` : '') +
             (rep.allure_zip ? `<a class="btn-xs btn-xs-view" href="/api/allure/${encodeURIComponent(rep.allure_zip)}" download title="Download allure-results (.zip)">📦 .zip</a>` : '');
           return `
           <div class="golden-item">
@@ -1805,3 +2059,272 @@ async function deleteAllReports() {
   await fetch('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({all: true})});
   loadReports();
 }
+
+// ── Resume in-progress jobs after a browser refresh ────────────────────────
+// Backend threads keep running independently of the browser tab; without this,
+// a refresh mid-run just shows nothing happening until the job silently finishes.
+function resumeFullRun() {
+  document.getElementById('fullrun-log-card').style.display = 'block';
+  document.getElementById('fullrun-start-btn').disabled = true;
+  document.getElementById('fullrun-stop-btn').disabled  = false;
+  setFullRunModeLocked(true);
+  document.getElementById('fullrun-status-dot').innerHTML = '<span class="pulse"></span>';
+  document.getElementById('fullrun-status-text').textContent = 'Watching all flows...';
+  fullRunSSE = new EventSource('/api/full-run/stream');
+  fullRunSSE.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    const log = document.getElementById('fullrun-log');
+    const line = document.createElement('div');
+    line.className = 'log-line log-' + item.type;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + item.msg;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+    if (item.result) {
+      const r = item.result;
+      if (r.flow) r.create_time = r.flow + ' · ' + r.create_time;
+      fullRunResults.push(r);
+      renderResultRow(r, 'fullrun-results-body');
+      updateFullRunCounters(fullRunResults);
+    }
+    if (item.type === 'done') {
+      fullRunSSE.close();
+      document.getElementById('fullrun-start-btn').disabled = false;
+      document.getElementById('fullrun-stop-btn').disabled  = true;
+      setFullRunModeLocked(false);
+      document.getElementById('fullrun-status-dot').innerHTML = '';
+      document.getElementById('fullrun-status-text').textContent = 'Idle';
+      if (item.report) {
+        const dl = document.getElementById('fullrun-report-dl');
+        dl.href = '/api/report/' + encodeURIComponent(item.report) + '?download=1';
+        dl.style.display = 'inline-flex';
+      }
+      showAllure(item.allure_zip, item.allure_html);
+      loadReports();
+    }
+  };
+}
+
+function resumeWatch() {
+  document.getElementById('watch-start-btn').disabled = true;
+  document.getElementById('watch-stop-btn').disabled  = false;
+  setWatchModeLocked(true);
+  document.getElementById('watch-status-dot').innerHTML = '<span class="pulse"></span>';
+  document.getElementById('watch-status-text').textContent = 'Watching...';
+  watchSSE = new EventSource('/api/watch/stream');
+  watchSSE.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    const log = document.getElementById('watch-log');
+    if (item.type === 'scanning') {
+      let scanEl = document.getElementById('watch-scan-status');
+      if (!scanEl) {
+        scanEl = document.createElement('div');
+        scanEl.id = 'watch-scan-status';
+        scanEl.style.cssText = 'font-size:11px;color:#64748b;padding:2px 0;font-style:italic';
+        log.appendChild(scanEl);
+      }
+      scanEl.textContent = item.msg;
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
+    const scanEl = document.getElementById('watch-scan-status');
+    if (scanEl) scanEl.remove();
+    const line = document.createElement('div');
+    line.className = 'log-line log-' + item.type;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + item.msg;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+    if (item.result) {
+      watchResults.push(item.result);
+      renderResultRow(item.result, 'watch-results-body');
+      updateWatchCounters(watchResults);
+    }
+    if (item.type === 'done') {
+      watchSSE.close();
+      document.getElementById('watch-start-btn').disabled = false;
+      document.getElementById('watch-stop-btn').disabled  = true;
+      setWatchModeLocked(false);
+      document.getElementById('watch-status-dot').innerHTML = '';
+      document.getElementById('watch-status-text').textContent = 'Idle';
+    }
+  };
+}
+
+function resumeLiveCapture() {
+  document.getElementById('cap-live-start-btn').disabled = true;
+  document.getElementById('cap-live-stop-btn').disabled  = false;
+  document.getElementById('cap-live-dot').innerHTML = '<span class="pulse"></span>';
+  document.getElementById('cap-live-status').textContent = 'Polling — trigger your flow now...';
+  liveCapSSE = new EventSource('/api/capture/live/stream');
+  liveCapSSE.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    const log  = document.getElementById('cap-live-log');
+    const line = document.createElement('div');
+    line.className = 'log-line log-' + item.type;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + item.msg;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+    if (item.type === 'done') {
+      liveCapSSE.close();
+      document.getElementById('cap-live-start-btn').disabled = false;
+      document.getElementById('cap-live-stop-btn').disabled  = true;
+      document.getElementById('cap-live-dot').innerHTML = '';
+      document.getElementById('cap-live-status').textContent = 'Done.';
+      if (item.saved && item.saved.length > 0) {
+        const el = document.getElementById('cap-live-result');
+        el.style.display = 'block';
+        document.getElementById('cap-live-result-body').innerHTML =
+          `<p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ ${item.saved.length} golden snapshot(s) saved.</p>` +
+          item.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('');
+      }
+    }
+  };
+}
+
+function resumeKowlCapture() {
+  document.getElementById('kc-start-btn').disabled = true;
+  document.getElementById('kc-stop-btn').disabled  = false;
+  document.getElementById('kc-dot').innerHTML = '<span class="pulse"></span>';
+  document.getElementById('kc-status').textContent = 'Capturing — run your flow...';
+  const log = document.getElementById('kc-log');
+  log.style.display = 'block';
+  kowlCapSSE = new EventSource('/api/kowl-capture/stream');
+  kowlCapSSE.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    const line = document.createElement('div');
+    line.className = 'log-line log-' + item.type;
+    line.textContent = new Date().toLocaleTimeString() + '  ' + item.msg;
+    log.appendChild(line); log.scrollTop = log.scrollHeight;
+    if (item.type === 'done') {
+      kowlCapSSE.close();
+      document.getElementById('kc-start-btn').disabled = false;
+      document.getElementById('kc-stop-btn').disabled  = true;
+      document.getElementById('kc-dot').innerHTML = '';
+      document.getElementById('kc-status').textContent = 'Idle';
+      loadTopicBaselines();
+    }
+  };
+}
+
+function resumeTopicCapture() {
+  const btn = document.getElementById('tc-cap-btn');
+  const stopBtn = document.getElementById('tc-cap-stop-btn');
+  btn.disabled = true; btn.textContent = '⏳ Capturing...';
+  stopBtn.style.display = 'inline-flex';
+  const card = document.getElementById('tc-cap-result');
+  const body = document.getElementById('tc-cap-result-body');
+  card.style.display = 'block';
+  const progressBar = document.createElement('div');
+  progressBar.style.cssText = 'font-size:12px;color:var(--text-muted);margin-bottom:8px';
+  body.innerHTML = '';
+  body.appendChild(progressBar);
+  const sse = new EventSource('/api/topics/capture/stream');
+  _tcCaptureSSE = sse;
+  sse.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    if (item.type === 'progress') {
+      progressBar.textContent = `⏳ [${item.current}/${item.total}] Fetching: ${item.topic}`;
+    } else if (item.type === 'ok') {
+      const div = document.createElement('div');
+      div.style.cssText = 'font-family:monospace;font-size:11px;color:var(--log-pass,#86efac);padding:1px 0';
+      div.textContent = item.msg;
+      body.insertBefore(div, progressBar);
+    } else if (item.type === 'topic_error') {
+      const div = document.createElement('div');
+      div.style.cssText = 'font-family:monospace;font-size:11px;color:var(--log-fail,#fca5a5);padding:1px 0';
+      div.textContent = item.msg;
+      body.insertBefore(div, progressBar);
+    } else if (item.type === 'done') {
+      sse.close();
+      _tcCaptureSSE = null;
+      stopBtn.style.display = 'none';
+      progressBar.remove();
+      const summary = document.createElement('div');
+      summary.style.cssText = 'font-size:12px;margin-top:8px;padding-top:8px;border-top:1px solid #334155';
+      summary.innerHTML = item.keys
+        ? `<span style="color:var(--log-pass,#86efac)">✅ Done — ${item.keys} key(s) from ${item.messages} message(s)</span>`
+        : `<span style="color:#fbbf24">⚠️ No messages captured — topics may be empty</span>`;
+      body.appendChild(summary);
+      loadTopicBaselines();
+      btn.disabled = false; btn.textContent = '📥 Capture Baseline (snapshot)';
+    } else if (item.type === 'error') {
+      sse.close();
+      _tcCaptureSSE = null;
+      stopBtn.style.display = 'none';
+      const summary = document.createElement('div');
+      summary.style.cssText = 'font-size:12px;margin-top:8px;padding-top:8px;border-top:1px solid #334155;color:#fbbf24';
+      summary.textContent = '⏹ ' + (item.msg || 'Stopped.');
+      body.appendChild(summary);
+      btn.disabled = false; btn.textContent = '📥 Capture Baseline (snapshot)';
+    }
+  };
+}
+
+function resumeTopicCompare() {
+  const btn = document.getElementById('tc-cmp-btn');
+  const stopBtn = document.getElementById('tc-stop-btn');
+  btn.disabled = true; btn.textContent = '⏳ Comparing...';
+  stopBtn.style.display = 'inline-flex';
+  const resultCard = document.getElementById('tc-cmp-result');
+  const body = document.getElementById('tc-results-body');
+  resultCard.style.display = 'block';
+  document.getElementById('tc-summary').style.display = 'none';
+  const progressRow = document.createElement('tr');
+  progressRow.innerHTML = '<td colspan="6"><div id="tc-cmp-progress" style="font-size:12px;padding:8px">Resuming compare...</div></td>';
+  body.innerHTML = '';
+  body.appendChild(progressRow);
+  const progressEl = document.getElementById('tc-cmp-progress');
+  const sse = new EventSource('/api/topics/compare/stream');
+  _tcCompareSSE = sse;
+  sse.onmessage = (e) => {
+    const item = JSON.parse(e.data);
+    if (item.type === 'ping') return;
+    if (item.type === 'progress') {
+      progressEl.textContent = `⏳ [${item.current}/${item.total}] Comparing: ${item.topic}`;
+    } else if (item.type === 'ok') {
+      const info = document.createElement('tr');
+      info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:var(--log-pass,#22c55e);padding:2px 8px">${item.msg}</div></td>`;
+      body.insertBefore(info, progressRow);
+    } else if (item.type === 'topic_error') {
+      const info = document.createElement('tr');
+      info.innerHTML = `<td colspan="6"><div style="font-family:monospace;font-size:11px;color:var(--log-fail,#f87171);padding:2px 8px">${item.msg}</div></td>`;
+      body.insertBefore(info, progressRow);
+    } else if (item.type === 'done') {
+      sse.close(); _tcCompareSSE = null;
+      progressRow.remove();
+      renderTopicResults(item.results || []);
+      const dl = document.getElementById('tc-report-dl');
+      if (item.report) {
+        dl.href = '/api/report/' + encodeURIComponent(item.report) + '?download=1';
+        dl.style.display = 'inline-flex';
+      } else {
+        dl.style.display = 'none';
+      }
+      if (typeof loadReports === 'function') loadReports();
+      btn.disabled = false; btn.textContent = '🔍 Compare';
+      stopBtn.style.display = 'none';
+    } else if (item.type === 'error') {
+      sse.close(); _tcCompareSSE = null;
+      if (progressEl) progressEl.textContent = '⏹ ' + (item.msg || 'Stopped.');
+      btn.disabled = false; btn.textContent = '🔍 Compare';
+      stopBtn.style.display = 'none';
+    }
+  };
+}
+
+async function resumeRunningJobs() {
+  try {
+    const status = await (await fetch('/api/runtime/status')).json();
+    if (status.full_watch)    resumeFullRun();
+    if (status.watch)         resumeWatch();
+    if (status.capture)       resumeLiveCapture();
+    if (status.kowl_capture)  resumeKowlCapture();
+    if (status.topic_capture) resumeTopicCapture();
+    if (status.topic_compare) resumeTopicCompare();
+  } catch (e) {}
+}
+document.addEventListener('DOMContentLoaded', resumeRunningJobs);

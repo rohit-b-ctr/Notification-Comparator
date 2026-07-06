@@ -1,6 +1,5 @@
 """All HTTP routes, exposed as a Flask Blueprint."""
 import json
-import queue
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -21,7 +20,7 @@ from core.isd import *
 from core.live import capture_live_thread, watch_thread_fn, full_watch_thread_fn
 from core.state import (
     watch_state, full_watch_state, capture_state, kowl_capture_state,
-    topic_capture_state, topic_compare_state,
+    topic_capture_state, topic_compare_state, Broadcaster,
 )
 
 bp = Blueprint("api", __name__)
@@ -29,6 +28,20 @@ bp = Blueprint("api", __name__)
 @bp.route("/")
 def index():
     return current_app.send_static_file("index.html")
+
+@bp.route("/api/runtime/status")
+def api_runtime_status():
+    """Lets the frontend re-attach to still-running jobs after a page refresh
+    instead of showing them as stopped (the backend threads keep running
+    independently of the browser tab)."""
+    return jsonify({
+        "capture":        bool(capture_state["running"]),
+        "kowl_capture":   bool(kowl_capture_state["running"]),
+        "watch":          bool(watch_state["running"]),
+        "full_watch":     bool(full_watch_state["running"]),
+        "topic_capture":  bool(topic_capture_state["running"]),
+        "topic_compare":  bool(topic_compare_state["running"]),
+    })
 
 @bp.route("/api/config", methods=["GET"])
 def api_get_config():
@@ -93,9 +106,27 @@ def api_test_connection():
         cur = conn.cursor()
         cur.execute("SELECT 1")
         cur.close(); conn.close(); tunnel.stop()
-        return jsonify({"ok": True, "msg": "Connection successful ✅"})
+        return jsonify({"ok": True, "msg": "✅ PostgreSQL connection successful"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
+
+@bp.route("/api/config/test-kowl", methods=["POST"])
+def api_test_kowl():
+    cfg  = load_config()
+    host = (cfg.get("topic_host") or "").strip()
+    if not host:
+        return jsonify({"ok": False, "msg": "⚠️ No Kowl baseline host configured"})
+    try:
+        import requests  # type: ignore[import]
+        base = host.rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base
+        resp = requests.get(f"{base}/api/topics", timeout=8, verify=False)
+        if resp.status_code == 200:
+            return jsonify({"ok": True, "msg": f"✅ Kowl reachable at {host}"})
+        return jsonify({"ok": False, "msg": f"Kowl returned HTTP {resp.status_code}"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"Kowl connection failed: {e}"})
 
 @bp.route("/api/goldens")
 def api_goldens():
@@ -113,6 +144,7 @@ def api_capture():
     ext_id     = data.get("ext_id") or None
     if not since and not ext_id:
         return jsonify({"ok": False, "error": "Provide either a since time or an External Request ID"}), 400
+    tunnel = None
     try:
         tunnel = open_tunnel()
         conn = connect_db(tunnel)
@@ -126,12 +158,14 @@ def api_capture():
                 if key not in saved:
                     save_golden(key, payload)
                     saved[key] = True
-            except Exception as e:
+            except Exception:
                 pass  # silently skip malformed rows
-        cur.close(); conn.close(); tunnel.stop()
+        cur.close(); conn.close()
         return jsonify({"ok": True, "saved": list(saved.keys()), "total_fetched": len(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        if tunnel: tunnel.stop()
 
 @bp.route("/api/compare", methods=["POST"])
 def api_compare():
@@ -148,16 +182,19 @@ def api_compare():
 
     if not since and not ext_id:
         return jsonify({"ok": False, "error": "Provide either a time range (since) or an External Request ID"}), 400
+    tunnel = None
     try:
         tunnel = open_tunnel()
         conn = connect_db(tunnel)
         cur = conn.cursor()
         rows = fetch_notifications(cur, subscriber, since=since, ext_id=ext_id)
         results = process_rows(rows, mode=mode, source=gsource)
-        cur.close(); conn.close(); tunnel.stop()
+        cur.close(); conn.close()
         return jsonify({"ok": True, "results": results, "total": len(rows)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        if tunnel: tunnel.stop()
 
 @bp.route("/api/capture/live/start", methods=["POST"])
 def api_capture_live_start():
@@ -176,7 +213,7 @@ def api_capture_live_start():
     capture_state["running"] = True
     capture_state["seen"]    = set()
     capture_state["saved"]   = {}
-    capture_state["log_queue"] = queue.Queue()
+    capture_state["log_queue"] = Broadcaster()
     capture_state["thread"]  = t
     t.start()
     return jsonify({"ok": True})
@@ -189,14 +226,16 @@ def api_capture_live_stop():
 @bp.route("/api/capture/live/stream")
 def api_capture_live_stream():
     def generate():
+        idx = 0
+        bus = capture_state["log_queue"]
         while True:
-            try:
-                item = capture_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") == "done":
-                    break
-            except queue.Empty:
+            idx, item = bus.get_from(idx)
+            if item is None:
                 yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") == "done":
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -215,7 +254,7 @@ def api_kowl_capture_start():
     interval = parse_int(data.get("interval"), 3)
     kowl_capture_state["running"]   = True
     kowl_capture_state["saved"]     = {}
-    kowl_capture_state["log_queue"] = queue.Queue()
+    kowl_capture_state["log_queue"] = Broadcaster()
     t = threading.Thread(target=kowl_capture_thread, args=(host, interval), daemon=True)
     kowl_capture_state["thread"] = t
     t.start()
@@ -229,14 +268,16 @@ def api_kowl_capture_stop():
 @bp.route("/api/kowl-capture/stream")
 def api_kowl_capture_stream():
     def generate():
+        idx = 0
+        bus = kowl_capture_state["log_queue"]
         while True:
-            try:
-                item = kowl_capture_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") == "done":
-                    break
-            except queue.Empty:
+            idx, item = bus.get_from(idx)
+            if item is None:
                 yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") == "done":
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -284,14 +325,16 @@ def api_watch_stop():
 @bp.route("/api/watch/stream")
 def api_watch_stream():
     def generate():
+        idx = 0
+        bus = watch_state["log_queue"]
         while True:
-            try:
-                item = watch_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") == "done":
-                    break
-            except queue.Empty:
-                yield "data: {\"type\":\"ping\"}\n\n"
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") == "done":
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -307,11 +350,11 @@ def api_full_run_start():
     origin = resolve_data_source(golden, data.get("data_source"))
     if origin == "db" and not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-    interval = int(data.get("interval", 3))
+    interval = parse_int(data.get("interval"), 3)
     full_watch_state["mode"] = data.get("mode", "full")
     full_watch_state["source"] = golden
     full_watch_state["data_source"] = origin
-    full_watch_state["log_queue"] = queue.Queue()
+    full_watch_state["log_queue"] = Broadcaster()
     full_watch_state["results"] = []
     full_watch_state["running"] = True  # set before start() so a fast stop() wins the race
     t = threading.Thread(target=full_watch_thread_fn, args=(interval,), daemon=True)
@@ -327,14 +370,16 @@ def api_full_run_stop():
 @bp.route("/api/full-run/stream")
 def api_full_run_stream():
     def generate():
+        idx = 0
+        bus = full_watch_state["log_queue"]
         while True:
-            try:
-                item = full_watch_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") == "done":
-                    break
-            except queue.Empty:
-                yield "data: {\"type\":\"ping\"}\n\n"
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") == "done":
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -425,24 +470,31 @@ def api_topics_capture_start():
     if not topics:
         return jsonify({"error": "No topics configured."}), 400
     topic_capture_state["running"]   = True
-    topic_capture_state["log_queue"] = queue.Queue()
+    topic_capture_state["log_queue"] = Broadcaster()
     t = threading.Thread(target=capture_topics_thread,
                          args=(host, topics, count, topic_capture_state), daemon=True)
     topic_capture_state["thread"] = t
     t.start()
     return jsonify({"ok": True, "total": len(topics)})
 
+@bp.route("/api/topics/capture/stop", methods=["POST"])
+def api_topics_capture_stop():
+    topic_capture_state["running"] = False
+    return jsonify({"ok": True})
+
 @bp.route("/api/topics/capture/stream")
 def api_topics_capture_stream():
     def generate():
+        idx = 0
+        bus = topic_capture_state["log_queue"]
         while True:
-            try:
-                item = topic_capture_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") == "done":
-                    break
-            except queue.Empty:
+            idx, item = bus.get_from(idx)
+            if item is None:
                 yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -492,9 +544,53 @@ def _generate_topic_report(results, mode, gsource, started_dt):
                      allure_zip=allure.get("zip"), allure_html=allure.get("html"))
     return {"report": report_name, "allure_zip": allure.get("zip"), "allure_html": allure.get("html")}
 
+@bp.route("/api/topics/debug")
+def api_topics_debug():
+    """Return first 5 raw WebSocket frames from Kowl for a topic — for diagnosing 0-message issues."""
+    from core.kowl import _normalise_host, fetch_topic_messages
+    import websocket, json as _json, ssl as _ssl, time as _time
+    cfg  = get_cfg()
+    host = (cfg.get("topic_host") or "").strip()
+    topics = cfg.get("topics", [])
+    topic  = request.args.get("topic") or (topics[0]["topic"] if topics else "")
+    if not host or not topic:
+        return jsonify({"error": "host or topic not configured"})
+    _, ws_base, is_tls = _normalise_host(host)
+    ws_url = f"{ws_base}/api/topics/{topic}/messages"
+    req_body = {"topicName": topic, "startOffset": -1, "startTimestamp": 0,
+                "partitionId": -1, "maxResults": 5, "filterInterpreterCode": ""}
+    frames, error = [], None
+    try:
+        sslopt = {"cert_reqs": _ssl.CERT_NONE} if is_tls else {}
+        ws = websocket.create_connection(ws_url, timeout=10, sslopt=sslopt,
+                                         header={"Origin": f"http://{ws_base.split('://',1)[-1]}"})
+        ws.send(_json.dumps(req_body))
+        ws.settimeout(5)
+        start = _time.time()
+        while _time.time() - start < 10 and len(frames) < 8:
+            try:
+                raw = ws.recv()
+                o = _json.loads(raw)
+                frames.append(o)
+                if o.get("type") in ("done", "error"):
+                    break
+            except Exception as e:
+                error = str(e); break
+        ws.close()
+    except Exception as e:
+        error = str(e)
+    return jsonify({"ws_url": ws_url, "frames": frames, "error": error})
+
+@bp.route("/api/topics/compare/stop", methods=["POST"])
+def api_topics_compare_stop():
+    topic_compare_state["running"] = False
+    topic_compare_state["log_queue"].put({"type": "error", "msg": "Stopped by user."})
+    return jsonify({"ok": True})
+
 @bp.route("/api/topics/compare/start", methods=["POST"])
 def api_topics_compare_start():
-    if topic_compare_state["running"]:
+    t_old = topic_compare_state.get("thread")
+    if topic_compare_state["running"] and t_old is not None and t_old.is_alive():
         return jsonify({"error": "Compare already running"}), 400
     data    = request.get_json(force=True) or {}
     cfg     = load_config()
@@ -511,7 +607,7 @@ def api_topics_compare_start():
     if gsource == "kowl" and not list_topic_baselines():
         return jsonify({"error": "No kowl baseline stored yet. Capture one first."}), 400
     topic_compare_state["running"]   = True
-    topic_compare_state["log_queue"] = queue.Queue()
+    topic_compare_state["log_queue"] = Broadcaster()
     t = threading.Thread(target=_compare_topics_thread,
                          args=(host, topics, count, mode, gsource, topic_compare_state), daemon=True)
     topic_compare_state["thread"] = t
@@ -521,14 +617,16 @@ def api_topics_compare_start():
 @bp.route("/api/topics/compare/stream")
 def api_topics_compare_stream():
     def generate():
+        idx = 0
+        bus = topic_compare_state["log_queue"]
         while True:
-            try:
-                item = topic_compare_state["log_queue"].get(timeout=30)
-                yield f"data: {json.dumps(item)}\n\n"
-                if item.get("type") in ("done", "error"):
-                    break
-            except queue.Empty:
+            idx, item = bus.get_from(idx)
+            if item is None:
                 yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -684,7 +782,9 @@ def api_run_all():
             count = int(cfg.get("topic_count") or 50)
             if not host:
                 return jsonify({"error": "No Kowl host configured (Config tab)."}), 400
-            results = compare_topics(host, cfg.get("topics", []), count, mode=mode)
+            prefix  = (cfg.get("topic_prefix_b") or "").strip()
+            topics  = apply_prefix(cfg.get("topics", []), prefix)
+            results = compare_topics(host, topics, count, mode=mode)
             per_flow = {}
             for r in results:
                 label = (r.get("key") or "?").split("__")[0]
@@ -754,7 +854,7 @@ def api_get_allure_html(run_id, sub="index.html"):
     """Serve a generated Allure HTML report (only present if the allure CLI was installed)."""
     base = (ALLURE_DIR / f"{run_id}-html").resolve()
     target = (base / sub).resolve()
-    if base not in target.parents and target != base or not target.exists():
+    if not target.is_relative_to(base) or not target.exists():
         return jsonify({"error": "not found"}), 404
     mime = ("text/html" if target.suffix == ".html" else
             "application/javascript" if target.suffix == ".js" else

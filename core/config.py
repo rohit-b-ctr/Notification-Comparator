@@ -61,8 +61,13 @@ def load_config():
             # strip any secrets that may have been saved by older versions
             for f in SECRET_FIELDS:
                 saved.pop(f, None)
-            # strip whitespace from all string values
-            saved = {k: v.strip() if isinstance(v, str) else v for k, v in saved.items()}
+            # strip whitespace from all string values (including inside topics list)
+            def _strip(v):
+                if isinstance(v, str): return v.strip()
+                if isinstance(v, dict): return {k2: _strip(v2) for k2, v2 in v.items()}
+                if isinstance(v, list): return [_strip(i) for i in v]
+                return v
+            saved = {k: _strip(v) for k, v in saved.items()}
             return {**DEFAULT_CONFIG, **saved}
         except Exception:
             pass

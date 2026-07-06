@@ -35,6 +35,9 @@ def fetch_notifications(cursor, subscriber_ids, since=None, ext_id=None, limit=3
     cfg = get_cfg()
     if isinstance(subscriber_ids, int):
         subscriber_ids = [subscriber_ids]
+    subscriber_ids = [s for s in subscriber_ids if s is not None]
+    if not subscriber_ids:
+        return []
     placeholders = ",".join(["%s"] * len(subscriber_ids))
     q = f"""SELECT id, create_time, status, status_code, subscriber_id, payload
             FROM {cfg['db_table']}
