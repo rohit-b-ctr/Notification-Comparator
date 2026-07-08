@@ -6,7 +6,7 @@ from deepdiff import DeepDiff  # type: ignore[import]
 
 from core.config import *
 from core.diffing import *
-from core.db import open_tunnel, connect_db, fetch_notifications
+from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscriber_ids
 
 def current_project():
     return (load_config().get("project") or "").strip()
@@ -19,31 +19,61 @@ def golden_root():
 # Capture sources — golden data is filed under golden/{project}/{source}/{FLOW}/...
 GOLDEN_SOURCES = ("db", "isd", "kowl")
 
-def golden_path(key, source="db"):
-    """Write path: golden/{project}/{source}/{FLOW}/{key}.json"""
-    flow_type = key.split("__")[0].upper()
+def label_for_pattern(cfg, pattern):
+    """Configured label for a pattern, e.g. 'service-request-cancel-success' -> 'PUT_Success'.
+    Falls back to the pattern text itself if it isn't in the configured list."""
+    pattern = (pattern or "").strip()
+    for entry in cfg.get("patterns", []):
+        if (entry.get("pattern") or "").strip() == pattern:
+            return (entry.get("label") or pattern).strip()
+    return pattern
+
+def _safe_folder(name):
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name).strip("_")
+    return safe or "OTHER"
+
+def golden_path(key, source="db", label=None):
+    """Write path: golden/{project}/{source}/{FOLDER}/{key}.json
+
+    FOLDER is the configured pattern label when given (so e.g. a
+    'service-request-cancel-success' pattern always files under its own
+    label folder, never under the internal notification 'type' field it
+    happens to carry, like PUT) — otherwise falls back to the legacy
+    behaviour of deriving the folder from the key's type prefix.
+    """
+    flow_type = _safe_folder(label) if label else key.split("__")[0].upper()
     return golden_root() / source / flow_type / f"{key}.json"
 
-def save_golden(key, payload, source="db"):
-    path = golden_path(key, source)
+def save_golden(key, payload, source="db", label=None):
+    path = golden_path(key, source, label=label)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str))
 
-def load_golden(key, source=None):
+def load_golden(key, source=None, label=None):
     """
     Find a golden by key.
     - source given  -> look ONLY in that source (golden/{project}/{source}/...).
     - source None   -> search all sources, then legacy locations.
+    - label given   -> look under the label folder first (see golden_path),
+                       then fall back to the legacy type-derived folder so
+                       goldens captured before pattern-based labeling still
+                       resolve.
     """
     flow_type = key.split("__")[0].upper()
+    label_folder = _safe_folder(label) if label else None
     if source:
-        candidates = [
+        candidates = []
+        if label_folder:
+            candidates.append(golden_root() / source / label_folder / f"{key}.json")
+        candidates += [
             golden_root() / source / flow_type / f"{key}.json",
             golden_root() / source / f"{key}.json",
         ]
     else:
         candidates = []
         for s in GOLDEN_SOURCES:
+            if label_folder:
+                candidates.append(golden_root() / s / label_folder / f"{key}.json")
             candidates.append(golden_root() / s / flow_type / f"{key}.json")
             candidates.append(golden_root() / s / f"{key}.json")
         candidates += [
@@ -86,14 +116,14 @@ def extract_ext_id(raw_payload):
     except Exception:
         return ""
 
-def process_rows(rows, mode="full", source=None):
+def process_rows(rows, mode="full", source=None, label=None):
     results = []
     for row in rows:
         try:
             ext_id  = extract_ext_id(row["payload"])
             payload = clean_payload(row["payload"])
             key     = notif_key(payload)
-            golden  = load_golden(key, source=source)
+            golden  = load_golden(key, source=source, label=label)
             if golden is None:
                 results.append({"db_id": row["id"], "create_time": str(row["create_time"]),
                                  "key": key, "ext_id": ext_id, "status": "NO GOLDEN", "findings": [],
@@ -120,27 +150,24 @@ def process_rows(rows, mode="full", source=None):
 # Volatile fields stripped from topic envelopes before diffing (in addition to
 # the DB IGNORE_FIELDS). These differ on every message / every setup.
 
-FLOW_SUBSCRIBER_KEYS = {
-    "PUT":   "subscriber_put",
-    "PICK":  "subscriber_pick",
-    "AUDIT": "subscriber_audit",
-    "OTHER": "subscriber_other",
-}
-
 def run_all_db_flows(since=None, limit=200, mode="full", source="db"):
-    """Compare recent notifications for every configured subscriber flow against goldens."""
+    """Compare recent notifications for every configured pattern against goldens."""
     cfg = get_cfg()
-    tunnel = open_tunnel(cfg)
+    tunnel = open_tunnel(cfg, target=True)
     try:
-        conn = connect_db(tunnel, cfg)
+        conn = connect_db(tunnel, cfg, target=True)
         cur = conn.cursor()
         all_results, per_flow = [], {}
-        for flow, cfg_key in FLOW_SUBSCRIBER_KEYS.items():
-            sub = cfg.get(cfg_key)
-            if not sub:
+        for entry in cfg.get("patterns", []):
+            pattern = (entry.get("pattern") or "").strip()
+            if not pattern:
                 continue
-            rows = fetch_notifications(cur, int(sub), since=since, limit=limit)
-            res = process_rows(rows, mode=mode, source=source)
+            flow = (entry.get("label") or pattern).strip()
+            sub_ids = resolve_subscriber_ids(cur, [pattern])
+            if not sub_ids:
+                continue
+            rows = fetch_notifications(cur, sub_ids, since=since, limit=limit)
+            res = process_rows(rows, mode=mode, source=source, label=flow)
             for r in res:
                 r["flow"] = flow
             per_flow[flow] = {

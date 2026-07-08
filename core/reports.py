@@ -186,7 +186,7 @@ def _created_from_name(name):
 def list_reports_meta():
     """Return report descriptors (newest first), reading sidecars when present."""
     out = []
-    for p in sorted(REPORTS_DIR.glob("*.html"), key=lambda x: x.name, reverse=True):
+    for p in REPORTS_DIR.glob("*.html"):
         sidecar = REPORTS_DIR / f"{p.name}.meta.json"
         if sidecar.exists():
             try:
@@ -195,6 +195,14 @@ def list_reports_meta():
             except Exception:
                 pass
         out.append({"name": p.name, "created": _created_from_name(p.name)})
+    # Sort by actual creation time, not filename — report names have different
+    # prefixes (full_run_, run_all_, topic_compare_...) so sorting by the raw
+    # filename alphabetizes by prefix first and scrambles the true time order.
+    out.sort(key=lambda r: r.get("created") or "", reverse=True)
+    # Stable id, independent of sort/filter order in the UI — oldest report is 1.
+    total = len(out)
+    for i, rep in enumerate(out):
+        rep["id"] = total - i
     return out
 
 # ─── RUN-ALL (collective comparison across all DB flows) ──────────────────────

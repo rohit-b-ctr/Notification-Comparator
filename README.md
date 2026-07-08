@@ -6,10 +6,12 @@ A Flask web application that automates WMS notification validation. It captures 
 
 ## Features
 
-- **DB Capture & Compare** — poll `subscriber_history` over an SSH tunnel, capture golden snapshots per notification type, then diff any new run against them
+- **DB Capture & Compare** — poll `subscriber_history` over an SSH tunnel, capture golden snapshots per configured notification **pattern**, then diff any new run against them
+- **Pattern-based subscriber lookup** — notifications are selected by `subscriber.pattern` (a human-readable name you configure), not a hardcoded subscriber ID; supports any number of patterns, and multiple patterns can be captured/watched at once
+- **Separate baseline/target DB connections** — capture goldens from one environment (baseline) and compare live traffic from a different one (target); SSH port/user/key and DB name/user/table are shared
 - **Live Watch** — real-time DB polling triggered by you; compare notifications as they land without knowing timestamps in advance
 - **Full Run** — automated end-to-end: watch, capture, and compare in a single flow with Allure report generation
-- **Kafka / Kowl Topic Capture & Compare** — pull messages from Kowl REST API, save per-topic baselines, and compare target-env topics against them
+- **Kafka / Kowl Topic Capture & Compare** — stream messages from Kowl's WebSocket API, save per-topic baselines, and compare target-env topics against them
 - **ISD PDF Extraction** — extract structured JSON from ISD PDF documents and promote them directly to golden snapshots
 - **Direct JSON / XML Compare** — paste two payloads and diff them instantly, no DB or Kafka required
 - **Allure Reports** — every Full Run emits a downloadable `allure-results.zip`; if the Allure CLI is installed, the HTML report is generated in-app automatically
@@ -77,26 +79,27 @@ These are safe to commit and are editable either directly in the file or via the
 
 | Key | Description |
 |-----|-------------|
-| `ssh_host` | IP / hostname of the SSH jump host |
-| `ssh_port` | SSH port (default `22`) |
-| `ssh_user` | SSH username |
-| `db_host` | Postgres host (reachable from the jump host) |
-| `db_port` | Postgres port (default `5432`) |
-| `db_name` | Database name |
-| `db_user` | Database user |
+| `ssh_host` | SSH jump host for the **baseline** environment (where goldens are captured from) |
+| `ssh_host_b` | SSH jump host for the **target** environment (what's compared against the goldens) |
+| `ssh_port` | SSH port — shared by baseline and target (default `22`) |
+| `ssh_user` | SSH username — shared by baseline and target |
+| `db_host` | Postgres host for the **baseline** environment (reachable from `ssh_host`) |
+| `db_host_b` | Postgres host for the **target** environment (reachable from `ssh_host_b`) |
+| `db_port` | Postgres port — shared (default `5432`) |
+| `db_name` | Database name — shared |
+| `db_user` | Database user — shared |
 | `db_table` | Notification table (default `subscriber_history`) |
-| `subscriber_put` | Subscriber ID for Putaway notifications |
-| `subscriber_pick` | Subscriber ID for Pick notifications |
-| `subscriber_audit` | Subscriber ID for Audit notifications (null to skip) |
-| `subscriber_other` | Subscriber ID for any other notification type (null to skip) |
+| `patterns` | List of `{label, pattern}` objects. `pattern` must match a `subscriber.pattern` value in the DB; the app resolves it to `subscriber.id` and queries `db_table` by that ID. Add as many as you need — no fixed PUT/PICK/AUDIT categories |
 | `poll_interval` | Live-watch DB poll interval in seconds |
-| `project` | Active project name (used in report filenames) |
-| `topic_host` | Kowl base URL for the **source** environment |
+| `project` | Active project name (used in report filenames and golden folder) |
+| `topic_host` | Kowl base URL for the **baseline** environment |
 | `topic_host_b` | Kowl base URL for the **target** environment |
-| `topic_prefix` | Kafka topic prefix for the source environment |
+| `topic_prefix` | Kafka topic prefix for the baseline environment |
 | `topic_prefix_b` | Kafka topic prefix for the target environment |
 | `topic_count` | Number of latest messages to fetch per topic |
 | `topics` | List of `{label, topic}` objects — the topics displayed in the Kafka tab |
+
+Golden snapshots are captured under a **pattern's own label folder**, not by whatever internal `type` field happens to be in the payload — so a pattern like `service-request-cancel-success` that happens to carry `type: PUT` internally still files under its own label, never mixed into a generic `PUT` folder.
 
 ### Secret settings — entered in the UI each session
 
@@ -104,8 +107,9 @@ These are **never written to `config.json`**. Enter them on the **Config** tab a
 
 | Secret | Description |
 |--------|-------------|
-| DB Password | Password for `db_user` |
-| SSH Key Path | Absolute path to your private key, e.g. `~/.ssh/rohit_b_ctr_greyorange_com` |
+| DB Password (baseline) | Password for `db_user` on the baseline DB |
+| DB Password (target) | Password for `db_user` on the target DB (falls back to the baseline password if left blank) |
+| SSH Key Path | Absolute path to your private key, e.g. `~/.ssh/rohit_b_ctr_greyorange_com` — shared by both baseline and target |
 
 The UI offers a **Save secrets** option that writes them to a local `.secrets` file so they survive app restarts. Use this only on a personal machine — never on a shared or CI server.
 
@@ -127,30 +131,30 @@ The app binds to `0.0.0.0:5050` so it is reachable from other machines on the sa
 
 ### Config Tab
 
-1. Enter your **DB Password** and **SSH Key Path**.
-2. Click **Test Connection** to verify the SSH tunnel + DB are reachable.
-3. Click **Test Kowl** to verify the Kowl REST API is reachable.
-4. Adjust any non-secret settings and click **Save Config**.
+1. Add your notification **patterns** — one per line as `Label = pattern`, where `pattern` matches a `subscriber.pattern` value in the DB (e.g. `PUT_Success = service-request-cancel-success`).
+2. Enter your **DB Password** (baseline, and target if different) and **SSH Key Path**.
+3. Click **Test Baseline** / **Test Target** to verify each SSH tunnel + DB is reachable.
+4. Click **Test Kowl** to verify the Kowl host is reachable.
+5. Adjust any non-secret settings and click **Save**.
 
 ### DB Notifications — Capture Golden Baseline
 
-1. Run a known-good WMS flow (Putaway, Pick, Audit, etc.) in your source environment.
-2. Go to the **Capture** tab.
-3. Set the **Since** timestamp to just before the flow started.
-4. Click **Capture**. The app fetches rows from `subscriber_history`, groups them by `(flow_type, state, notification_type)`, and saves one `.json` file per group under `golden/`.
+1. Run a known-good WMS flow in your **baseline** environment.
+2. Go to the **Capture** tab. Check one or more configured patterns (pulled straight from Config — no need to retype them), or use **Live Poll & Capture** to capture as the flow runs.
+3. Set the **Since** timestamp to just before the flow started (or leave blank for live poll).
+4. Click **Capture**. The app resolves each checked pattern to its `subscriber.id`, fetches matching rows from `subscriber_history` on the **baseline** DB, and saves one `.json` golden per distinct `(type, state, status)` key under `golden/{project}/db/{pattern_label}/`.
 
-Golden files are named:
+For example, capturing pattern `PUT_Success` saves to:
 ```
-golden/{project}/{FLOW_TYPE}__{state}__{notification_type}.json
+golden/Apotek_Prod/db/PUT_Success/PUT__created__success.json
 ```
-For example: `golden/Apotek_Prod/PICK__created__order_information.json`
 
 ### DB Notifications — Compare a New Run
 
-1. Trigger the same flow in your target environment.
-2. Go to the **Compare** tab.
+1. Trigger the same flow in your **target** environment.
+2. Go to the **Compare** tab and enter/select the pattern to compare.
 3. Set the **Since** timestamp.
-4. Click **Compare**. Each notification payload is diffed against its golden counterpart. Results appear as a pass/fail table with expandable diff rows showing exact field-level changes.
+4. Click **Compare**. The app queries the **target** DB and diffs each notification payload against its golden counterpart (looked up under that pattern's own label folder). Results appear as a pass/fail table with expandable diff rows showing exact field-level changes.
 
 ### Live Watch
 
@@ -174,9 +178,8 @@ Combines Watch + Compare into a single timed session and generates Allure + HTML
 ### Kafka / Kowl Topics
 
 1. Go to the **Topics** tab.
-2. Select one or more topics from the list.
-3. Click **Capture Baseline** to snapshot the latest N messages from the **source** Kowl host.
-4. Later, click **Compare** to fetch the same topics from the **target** Kowl host and diff them against the baseline.
+2. Click **Capture Baseline** to stream the latest N messages for every configured topic from the **baseline** Kowl host over its WebSocket API.
+3. Later, click **Compare** to stream the same topics from the **target** Kowl host and diff them against the baseline. Both actions have a **Stop** button and survive a page refresh — reopening the page reattaches to a still-running capture/compare instead of losing progress.
 
 ### ISD PDF Extraction
 
@@ -195,9 +198,10 @@ No DB, no Kafka — just paste two payloads and compare.
 2. Paste the **expected** payload on the left and the **actual** payload on the right.
 3. Click **Compare**. Differences are highlighted inline.
 
-### Reports Tab
+### Past Reports (Dashboard)
 
-- Lists all generated HTML diff reports and Allure runs.
+- Lists all generated HTML diff reports and Allure runs, each with a stable `#id` (assigned chronologically, oldest = `#1`).
+- Search by report name or project, and sort by newest/oldest or name.
 - Download any report as a ZIP or open the Allure HTML viewer in-browser.
 - Delete individual reports or bulk-clear old runs.
 
@@ -217,7 +221,7 @@ Comparator/
 │   ├── golden.py               # Golden snapshot read/write
 │   ├── diffing.py              # DeepDiff wrapper + dynamic field exclusion
 │   ├── live.py                 # Live watch / Full Run logic
-│   ├── kowl.py                 # Kowl REST API client
+│   ├── kowl.py                 # Kowl WebSocket client (topic capture/compare)
 │   ├── isd.py                  # ISD PDF extraction (PyMuPDF)
 │   ├── allure.py               # Allure results generation
 │   ├── reports.py              # HTML report generation
@@ -249,13 +253,17 @@ To add or remove fields from this list, edit `IGNORED_FIELDS` in `core/diffing.p
 ## Troubleshooting
 
 ### "SSH connection refused" or tunnel timeout
-- Confirm VPN is active and the jump host (`ssh_host`) is reachable: `ping <ssh_host>`
+- Confirm VPN is active and the jump host (`ssh_host` for baseline, `ssh_host_b` for target) is reachable: `ping <ssh_host>`
 - Verify the SSH key path is correct and the key has the right permissions: `chmod 600 ~/.ssh/<key>`
 - Try connecting manually: `ssh -i ~/.ssh/<key> <ssh_user>@<ssh_host>`
 
 ### "Authentication failed" for DB
-- Double-check the DB password entered on the Config tab.
-- Confirm `db_user` and `db_name` match the target environment.
+- Double-check the DB password entered on the Config tab — baseline and target have separate password fields.
+- Confirm `db_user` and `db_name` match the environment you're testing.
+
+### "No subscriber found for pattern '...'"
+- The pattern text must exactly match a `subscriber.pattern` value in the `subscriber` table on that DB — check for typos or trailing whitespace.
+- Confirm you're querying the right side: Capture uses the **baseline** DB, Compare/Watch/Full Run use the **target** DB — the pattern may only exist on one of them.
 
 ### Kowl test fails
 - Check that `topic_host` / `topic_host_b` are reachable from this machine (e.g. `curl http://<topic_host>/api/topics`).

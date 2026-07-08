@@ -54,8 +54,7 @@ def api_save_config():
     data    = request.json
     current = load_config()
     merged  = {**current, **{k: v for k, v in data.items() if k not in SECRET_FIELDS}}
-    for key in ("ssh_port", "db_port", "poll_interval", "topic_count",
-                "subscriber_put", "subscriber_pick", "subscriber_audit", "subscriber_other"):
+    for key in ("ssh_port", "db_port", "poll_interval", "topic_count"):
         try:
             merged[key] = int(merged[key])
         except (ValueError, KeyError, TypeError):
@@ -67,10 +66,13 @@ def api_save_config():
 def api_set_secrets():
     """Store secrets in memory. Optionally persist to .secrets file."""
     data = request.json
-    db_pass = data.get("db_pass", "")
-    ssh_key = data.get("ssh_key", "")
+    db_pass   = data.get("db_pass", "")
+    db_pass_b = data.get("db_pass_b", "")
+    ssh_key   = data.get("ssh_key", "")
     if db_pass:
         RUNTIME_SECRETS["db_pass"] = db_pass
+    if db_pass_b:
+        RUNTIME_SECRETS["db_pass_b"] = db_pass_b
     if ssh_key:
         RUNTIME_SECRETS["ssh_key"] = ssh_key
     if data.get("save_to_disk"):
@@ -80,6 +82,7 @@ def api_set_secrets():
             save_secrets_to_disk(
                 RUNTIME_SECRETS["db_pass"],
                 RUNTIME_SECRETS["ssh_key"],
+                RUNTIME_SECRETS.get("db_pass_b", ""),
             )
         else:
             return jsonify({"ok": False,
@@ -99,14 +102,16 @@ def api_clear_saved_secrets():
 def api_test_connection():
     if not secrets_ready():
         return jsonify({"ok": False, "msg": "⚠️ Enter DB password and SSH key path first"}), 400
+    target = bool((request.json or {}).get("target"))
     try:
         cfg = get_cfg()
-        tunnel = open_tunnel(cfg)
-        conn = connect_db(tunnel, cfg)
+        tunnel = open_tunnel(cfg, target=target)
+        conn = connect_db(tunnel, cfg, target=target)
         cur = conn.cursor()
         cur.execute("SELECT 1")
         cur.close(); conn.close(); tunnel.stop()
-        return jsonify({"ok": True, "msg": "✅ PostgreSQL connection successful"})
+        which = "target" if target else "baseline"
+        return jsonify({"ok": True, "msg": f"✅ PostgreSQL connection successful ({which})"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
 
@@ -136,32 +141,44 @@ def api_goldens():
 def api_capture():
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-    data       = request.json
-    subscriber = parse_int(data.get("subscriber"))
-    if subscriber is None:
-        return jsonify({"ok": False, "error": "Select a flow (or enter a Subscriber ID) first"}), 400
+    data = request.json
+    patterns = data.get("patterns")
+    if patterns is None:  # back-compat with the old single-pattern payload
+        patterns = [data.get("pattern")] if data.get("pattern") else []
+    patterns = [p.strip() for p in patterns if p and p.strip()]
+    if not patterns:
+        return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
     since      = data.get("since")  or None
     ext_id     = data.get("ext_id") or None
     if not since and not ext_id:
         return jsonify({"ok": False, "error": "Provide either a since time or an External Request ID"}), 400
     tunnel = None
     try:
+        cfg = get_cfg()
         tunnel = open_tunnel()
         conn = connect_db(tunnel)
         cur = conn.cursor()
-        rows = fetch_notifications(cur, subscriber, since=since, ext_id=ext_id)
-        saved = {}
-        for row in rows:
-            try:
-                payload = clean_payload(row["payload"])
-                key = notif_key(payload)
-                if key not in saved:
-                    save_golden(key, payload)
-                    saved[key] = True
-            except Exception:
-                pass  # silently skip malformed rows
+        saved, errors, total_fetched = {}, [], 0
+        for pattern in patterns:
+            label = label_for_pattern(cfg, pattern)
+            sub_ids = resolve_subscriber_ids(cur, [pattern])
+            if not sub_ids:
+                errors.append(f"No subscriber found for pattern '{pattern}'")
+                continue
+            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
+            total_fetched += len(rows)
+            for row in rows:
+                try:
+                    payload = clean_payload(row["payload"])
+                    key = notif_key(payload)
+                    dedup_key = f"{label}/{key}"
+                    if dedup_key not in saved:
+                        save_golden(key, payload, label=label)
+                        saved[dedup_key] = True
+                except Exception:
+                    pass  # silently skip malformed rows
         cur.close(); conn.close()
-        return jsonify({"ok": True, "saved": list(saved.keys()), "total_fetched": len(rows)})
+        return jsonify({"ok": True, "saved": list(saved.keys()), "total_fetched": total_fetched, "errors": errors})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
@@ -171,10 +188,10 @@ def api_capture():
 def api_compare():
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-    data       = request.json
-    subscriber = parse_int(data.get("subscriber"))
-    if subscriber is None:
-        return jsonify({"ok": False, "error": "Select a flow (or enter a Subscriber ID) first"}), 400
+    data    = request.json
+    pattern = (data.get("pattern") or "").strip()
+    if not pattern:
+        return jsonify({"ok": False, "error": "Enter a pattern first"}), 400
     mode       = data.get("mode", "full")
     since      = data.get("since") or None
     ext_id     = data.get("ext_id") or None
@@ -184,11 +201,16 @@ def api_compare():
         return jsonify({"ok": False, "error": "Provide either a time range (since) or an External Request ID"}), 400
     tunnel = None
     try:
-        tunnel = open_tunnel()
-        conn = connect_db(tunnel)
+        cfg = get_cfg()
+        tunnel = open_tunnel(target=True)
+        conn = connect_db(tunnel, target=True)
         cur = conn.cursor()
-        rows = fetch_notifications(cur, subscriber, since=since, ext_id=ext_id)
-        results = process_rows(rows, mode=mode, source=gsource)
+        sub_ids = resolve_subscriber_ids(cur, [pattern])
+        if not sub_ids:
+            return jsonify({"ok": False, "error": f"No subscriber found for pattern '{pattern}'"}), 400
+        label = label_for_pattern(cfg, pattern)
+        rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
+        results = process_rows(rows, mode=mode, source=gsource, label=label)
         cur.close(); conn.close()
         return jsonify({"ok": True, "results": results, "total": len(rows)})
     except Exception as e:
@@ -204,12 +226,15 @@ def api_capture_live_start():
     if capture_state["running"] and t_old is not None and t_old.is_alive():
         return jsonify({"ok": False, "error": "Already running"}), 400
     data = request.json
-    subscriber = parse_int(data.get("subscriber"))
-    if subscriber is None:
-        return jsonify({"ok": False, "error": "Select a flow (or enter a Subscriber ID) first"}), 400
+    patterns = data.get("patterns")
+    if patterns is None:  # back-compat with the old single-pattern payload
+        patterns = [data.get("pattern")] if data.get("pattern") else []
+    patterns = [p.strip() for p in patterns if p and p.strip()]
+    if not patterns:
+        return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
     interval   = parse_int(data.get("interval"), 3)
     ext_id     = data.get("ext_id") or None
-    t = threading.Thread(target=capture_live_thread, args=(subscriber, interval, ext_id), daemon=True)
+    t = threading.Thread(target=capture_live_thread, args=(patterns, interval, ext_id), daemon=True)
     capture_state["running"] = True
     capture_state["seen"]    = set()
     capture_state["saved"]   = {}
@@ -300,19 +325,19 @@ def api_watch_start():
     golden = data.get("golden_source") or "db"
     origin = resolve_data_source(golden, data.get("data_source"))
     interval = parse_int(data.get("interval"), 3)
-    subscriber = 0
+    pattern = ""
     if origin == "db":
         if not secrets_ready():
             return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-        subscriber = parse_int(data.get("subscriber"))
-        if subscriber is None:
-            return jsonify({"ok": False, "error": "Select a flow (or enter a Subscriber ID) first"}), 400
+        pattern = (data.get("pattern") or "").strip()
+        if not pattern:
+            return jsonify({"ok": False, "error": "Enter a pattern first"}), 400
     watch_state["mode"]   = data.get("mode", "full")
     watch_state["ext_id"] = data.get("ext_id") or None
     watch_state["source"] = golden
     watch_state["data_source"] = origin
     watch_state["running"] = True  # set before start() so a fast stop() wins the race
-    t = threading.Thread(target=watch_thread_fn, args=(subscriber, interval), daemon=True)
+    t = threading.Thread(target=watch_thread_fn, args=(pattern, interval), daemon=True)
     watch_state["thread"] = t
     t.start()
     return jsonify({"ok": True})

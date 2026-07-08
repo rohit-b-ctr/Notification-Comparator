@@ -119,14 +119,14 @@
       </div>
     </div>
 
-    <div class="card" id="fullrun-allure-card" style="display:none">
-      <div class="card-title">📦 Allure Report</div>
-      <div id="fullrun-allure-body" style="font-size:13px;color:var(--text-muted)"></div>
-    </div>
-
     <div class="card" id="fullrun-log-card" style="display:none">
       <div class="card-title">Live Log</div>
       <div class="log-box" id="fullrun-log"></div>
+    </div>
+
+    <div class="card" id="fullrun-allure-card" style="display:none">
+      <div class="card-title">📦 Allure Report</div>
+      <div id="fullrun-allure-body" style="font-size:13px;color:var(--text-muted)"></div>
     </div>
     <div class="card" id="fullrun-results-card" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -147,6 +147,15 @@
           <button class="btn btn-danger" onclick="deleteAllReports()">🗑 Delete All</button>
           <button class="btn btn-ghost" onclick="loadReports()">↻ Refresh</button>
         </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <input type="search" id="rep-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" placeholder="🔎 Search by name or project…" style="flex:1;min-width:180px" oninput="renderReports()">
+        <select id="rep-sort" onchange="renderReports()" style="width:auto">
+          <option value="time-desc">Newest first</option>
+          <option value="time-asc">Oldest first</option>
+          <option value="name-asc">Name (A → Z)</option>
+          <option value="name-desc">Name (Z → A)</option>
+        </select>
       </div>
       <div id="dash-reports" style="color:var(--text-dim);font-size:13px">No reports yet.</div>
     </div>
@@ -181,18 +190,9 @@
         </div>
 
         <div class="flow-sub-row">
-          <div>
-            <label>Flow Type</label>
-            <div class="flow-pills" id="cap-flow-pills">
-              <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cap','PUT')">PUT</div>
-              <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cap','PICK')">PICK</div>
-              <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cap','AUDIT')">AUDIT</div>
-              <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cap','OTHER')">Other</div>
-            </div>
-          </div>
-          <div class="sub-input-wrap">
-            <label>Subscriber ID</label>
-            <input type="number" id="cap-subscriber" placeholder="auto-filled">
+          <div class="sub-input-wrap" style="flex:1">
+            <label>Pattern(s) <span style="font-weight:400;color:#334155">— from Config; check the ones to capture</span></label>
+            <div id="cap-pattern-checks" style="font-size:12px;font-family:monospace;color:#a5b4fc;max-height:140px;overflow-y:auto"></div>
           </div>
         </div>
 
@@ -229,19 +229,10 @@
           <div class="tab"        id="cap-live-fetch-tab-extid" onclick="switchCapLiveFetchTab('extid')">🔖 By Request ID</div>
         </div>
 
-        <div style="margin-bottom:14px">
-          <label>Flow Type</label>
-          <div class="flow-pills" id="cap-live-flow-pills">
-            <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cap-live','PUT')">PUT</div>
-            <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cap-live','PICK')">PICK</div>
-            <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cap-live','AUDIT')">AUDIT</div>
-            <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cap-live','OTHER')">Other</div>
-          </div>
-        </div>
         <div class="flex-row">
-          <div class="sub-input-wrap">
-            <label>Subscriber ID</label>
-            <input type="number" id="cap-live-subscriber" placeholder="auto-filled">
+          <div class="sub-input-wrap" style="flex:1">
+            <label>Pattern(s) <span style="font-weight:400;color:#334155">— from Config; check the ones to capture</span></label>
+            <div id="cap-live-pattern-checks" style="font-size:12px;font-family:monospace;color:#a5b4fc;max-height:140px;overflow-y:auto"></div>
           </div>
           <div>
             <label>Poll Interval (seconds)</label>
@@ -391,18 +382,9 @@
     <div id="cmp-src-notif">
     <div class="card">
       <div class="flow-sub-row" style="margin-bottom:14px">
-        <div>
-          <label>Flow Type</label>
-          <div class="flow-pills" id="cmp-flow-pills">
-            <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('cmp','PUT')">PUT</div>
-            <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('cmp','PICK')">PICK</div>
-            <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('cmp','AUDIT')">AUDIT</div>
-            <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('cmp','OTHER')">Other</div>
-          </div>
-        </div>
         <div class="sub-input-wrap">
-          <label>Subscriber ID</label>
-          <input type="number" id="cmp-subscriber" placeholder="auto-filled">
+          <label>Pattern</label>
+          <input type="text" id="cmp-pattern" list="cfg-patterns-datalist" placeholder="e.g. put_information">
         </div>
       </div>
 
@@ -638,22 +620,13 @@
         </div>
       </div>
 
-      <div style="margin-bottom:14px" id="watch-flow-block">
-        <label>Flow Type</label>
-        <div class="flow-pills" id="watch-flow-pills">
-          <div class="flow-pill pill-put"   data-flow="PUT"   onclick="selectFlowType('watch','PUT')">PUT</div>
-          <div class="flow-pill pill-pick"  data-flow="PICK"  onclick="selectFlowType('watch','PICK')">PICK</div>
-          <div class="flow-pill pill-audit" data-flow="AUDIT" onclick="selectFlowType('watch','AUDIT')">AUDIT</div>
-          <div class="flow-pill pill-other" data-flow="OTHER" onclick="selectFlowType('watch','OTHER')">Other</div>
-        </div>
-      </div>
       <div id="watch-kowl-note" style="display:none;margin-bottom:14px;font-size:12px;color:var(--text-dim)">
-        🧬 Topic-based — watches the configured Kowl topics (<span id="watch-kowl-topics">…</span>). No subscriber needed.
+        🧬 Topic-based — watches the configured Kowl topics (<span id="watch-kowl-topics">…</span>). No pattern needed.
       </div>
       <div class="flex-row">
         <div class="sub-input-wrap" id="watch-sub-wrap">
-          <label>Subscriber ID</label>
-          <input type="number" id="watch-subscriber" placeholder="auto-filled">
+          <label>Pattern</label>
+          <input type="text" id="watch-pattern" list="cfg-patterns-datalist" placeholder="e.g. put_information">
         </div>
         <div>
           <label>Poll Interval (seconds)</label>
@@ -740,16 +713,29 @@
           </div>
         </div>
 
-        <!-- DB Password -->
+        <!-- DB Password (baseline) -->
         <div style="flex:1">
           <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
             <span class="secret-pill secret-pill-amber">DB PASS</span>
-            <span class="secret-hint">postgres password</span>
+            <span class="secret-hint">baseline postgres password</span>
           </label>
           <div class="secret-input-wrap" onfocusin="this.classList.add('focused')" onfocusout="this.classList.remove('focused')">
             <div class="secret-icon">🔑</div>
             <input type="password" id="cfg-db-pass" placeholder="Enter password" class="secret-input">
             <button type="button" id="cfg-db-pass-toggle" class="secret-toggle" onclick="toggleVisible('cfg-db-pass','cfg-db-pass-toggle')">👁 Show</button>
+          </div>
+        </div>
+
+        <!-- DB Password (target) -->
+        <div style="flex:1">
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span class="secret-pill secret-pill-amber">DB PASS (TARGET)</span>
+            <span class="secret-hint">target postgres password</span>
+          </label>
+          <div class="secret-input-wrap" onfocusin="this.classList.add('focused')" onfocusout="this.classList.remove('focused')">
+            <div class="secret-icon">🔑</div>
+            <input type="password" id="cfg-db-pass-b" placeholder="Enter password" class="secret-input">
+            <button type="button" id="cfg-db-pass-b-toggle" class="secret-toggle" onclick="toggleVisible('cfg-db-pass-b','cfg-db-pass-b-toggle')">👁 Show</button>
           </div>
         </div>
 
@@ -774,12 +760,20 @@
         <span style="font-size:11px;font-weight:400;color:#3b5270;letter-spacing:.3px">DATABASE CONNECTION</span>
       </div>
 
-      <!-- SSH row -->
-      <div style="display:grid;grid-template-columns:1fr 120px 1fr;gap:12px;margin-bottom:12px">
+      <!-- SSH hosts row (baseline / target) -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
-          <label>SSH Host</label>
+          <label>Baseline SSH Host <span style="color:#334155;font-weight:400">(capture env)</span></label>
           <input type="text" id="cfg-ssh-host">
         </div>
+        <div>
+          <label>Target SSH Host <span style="color:#334155;font-weight:400">(compare env)</span></label>
+          <input type="text" id="cfg-ssh-host-b">
+        </div>
+      </div>
+
+      <!-- SSH shared row -->
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>SSH Port</label>
           <input type="number" id="cfg-ssh-port">
@@ -793,12 +787,20 @@
       <!-- divider -->
       <div style="border-top:1px solid #1e2a3a;margin:4px 0 14px"></div>
 
-      <!-- DB row -->
-      <div style="display:grid;grid-template-columns:1fr 100px 1fr 1fr;gap:12px;margin-bottom:12px">
+      <!-- DB hosts row (baseline / target) -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
-          <label>DB Host <span style="color:#334155">(via tunnel)</span></label>
+          <label>Baseline DB Host <span style="color:#334155;font-weight:400">(via tunnel)</span></label>
           <input type="text" id="cfg-db-host">
         </div>
+        <div>
+          <label>Target DB Host <span style="color:#334155;font-weight:400">(via tunnel)</span></label>
+          <input type="text" id="cfg-db-host-b">
+        </div>
+      </div>
+
+      <!-- DB shared row -->
+      <div style="display:grid;grid-template-columns:100px 1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>DB Port</label>
           <input type="number" id="cfg-db-port">
@@ -822,20 +824,17 @@
       <!-- divider -->
       <div style="border-top:1px solid #1e2a3a;margin:4px 0 14px"></div>
 
-      <!-- Subscriber IDs -->
-      <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:10px;letter-spacing:.4px">SUBSCRIBER IDs <span style="font-weight:400;color:#334155">— at least one required</span></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:6px">
-        <div><label>PUT</label><input type="number" id="cfg-sub-put" placeholder="e.g. 157"></div>
-        <div><label>PICK</label><input type="number" id="cfg-sub-pick" placeholder="e.g. 158"></div>
-        <div><label>AUDIT</label><input type="number" id="cfg-sub-audit" placeholder="e.g. 159"></div>
-        <div><label>Other</label><input type="number" id="cfg-sub-other" placeholder="e.g. 160"></div>
-      </div>
-      <div id="cfg-sub-error" style="color:#fca5a5;font-size:12px;margin-top:4px;display:none">⚠️ At least one subscriber ID must be set</div>
+      <!-- Notification Patterns -->
+      <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:10px;letter-spacing:.4px">NOTIFICATION PATTERNS <span style="font-weight:400;color:#334155">— at least one required, one per line: Label = pattern</span></div>
+      <textarea id="cfg-patterns" rows="8" class="mono-textarea" placeholder="PUT = put_information&#10;PICK = order_information&#10;Create Move Task = create-move-task-platform-events"></textarea>
+      <div id="cfg-pattern-error" style="color:#fca5a5;font-size:12px;margin-top:4px;display:none">⚠️ At least one pattern must be set</div>
+      <datalist id="cfg-patterns-datalist"></datalist>
 
       <!-- DB actions -->
-      <div style="display:flex;gap:10px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid #1e2a3a">
+      <div style="display:flex;gap:10px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid #1e2a3a;flex-wrap:wrap">
         <button type="button" class="btn btn-primary" onclick="saveConfig()" id="cfg-save-btn" style="background:#1e3a5f;color:#93c5fd;border:1px solid #2a4a6f">💾 Save</button>
-        <button type="button" class="btn btn-ghost" onclick="testConnection()" id="cfg-test-btn">🔌 Test Connection</button>
+        <button type="button" class="btn btn-ghost" onclick="testConnection(false)" id="cfg-test-btn">🔌 Test Baseline</button>
+        <button type="button" class="btn btn-ghost" onclick="testConnection(true)" id="cfg-test-btn-b">🔌 Test Target</button>
         <span id="cfg-status" style="font-size:12px;margin-left:4px"></span>
       </div>
     </div>

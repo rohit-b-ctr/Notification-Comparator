@@ -4,14 +4,16 @@ from datetime import datetime, timezone
 
 from core.config import *
 from core.diffing import *
-from core.db import open_tunnel, connect_db, fetch_notifications
-from core.golden import process_rows, run_all_db_flows, current_project, FLOW_SUBSCRIBER_KEYS, save_golden
+from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscriber_ids
+from core.golden import process_rows, run_all_db_flows, current_project, save_golden, label_for_pattern
 from core.kowl import kowl_watch_loop
 from core.reports import build_html_report, save_report, save_report_meta
 from core.allure import generate_allure, build_allure_results
 from core.state import watch_state, full_watch_state, capture_state
 
-def capture_live_thread(subscriber_id, interval, ext_id=None):
+def capture_live_thread(patterns, interval, ext_id=None):
+    if isinstance(patterns, str):
+        patterns = [patterns]
     cfg = get_cfg()
     log = capture_state["log_queue"]
     since = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -21,23 +23,40 @@ def capture_live_thread(subscriber_id, interval, ext_id=None):
         tunnel = open_tunnel(cfg)
         conn   = connect_db(tunnel, cfg)
         cur    = conn.cursor()
+        # Map subscriber_id -> configured pattern label, so a golden is filed
+        # under the pattern's own label folder rather than whatever internal
+        # "type" field happens to be in the payload (e.g. a
+        # service-request-cancel-success pattern that carries type=PUT must
+        # not land in the PUT folder).
+        sub_to_label = {}
+        for pattern in patterns:
+            label = label_for_pattern(cfg, pattern)
+            for sid in resolve_subscriber_ids(cur, [pattern]):
+                sub_to_label[sid] = label
+        sub_ids = list(sub_to_label.keys())
+        if not sub_ids:
+            log.put({"type": "error", "msg": f"No subscriber found for pattern(s): {', '.join(patterns)}."})
+            cur.close(); conn.close(); tunnel.stop()
+            return
         mode_msg = f"ext_id={ext_id}" if ext_id else "polling by time"
-        log.put({"type": "info", "msg": f"Connected. Watching ({mode_msg}) — trigger your flow now..."})
+        log.put({"type": "info", "msg": f"Connected. Watching {len(patterns)} pattern(s) ({mode_msg}) — trigger your flow now..."})
 
         while capture_state["running"]:
-            rows = fetch_notifications(cur, subscriber_id, since=since, ext_id=ext_id)
+            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
             new  = [r for r in rows if r["id"] not in capture_state["seen"]]
             for row in new:
                 capture_state["seen"].add(row["id"])
+                label = sub_to_label.get(row.get("subscriber_id"), "OTHER")
                 try:
                     payload = clean_payload(row["payload"])
                     key     = notif_key(payload)
-                    if key not in capture_state["saved"]:
-                        save_golden(key, payload)
-                        capture_state["saved"][key] = True
-                        log.put({"type": "pass", "msg": f"📸 [{row['id']}] Saved golden: {key}"})
+                    dedup_key = f"{label}/{key}"
+                    if dedup_key not in capture_state["saved"]:
+                        save_golden(key, payload, label=label)
+                        capture_state["saved"][dedup_key] = True
+                        log.put({"type": "pass", "msg": f"📸 [{row['id']}] Saved golden: {label}/{key}"})
                     else:
-                        log.put({"type": "info", "msg": f"⏭  [{row['id']}] Already captured: {key} (keeping first)"})
+                        log.put({"type": "info", "msg": f"⏭  [{row['id']}] Already captured: {label}/{key} (keeping first)"})
                 except Exception as e:
                     log.put({"type": "error", "msg": f"⚠️  [{row['id']}] Error: {e}"})
             time.sleep(interval)
@@ -52,7 +71,7 @@ def capture_live_thread(subscriber_id, interval, ext_id=None):
 
 # ─── WATCH THREAD ─────────────────────────────────────────────────────────────
 
-def watch_thread_fn(subscriber_id, interval):
+def watch_thread_fn(pattern, interval):
     # NOTE: running is set True by the start endpoint before this thread starts,
     # so a fast stop() can't be clobbered by a late-scheduled thread.
     watch_state["results"] = []
@@ -70,23 +89,29 @@ def watch_thread_fn(subscriber_id, interval):
 
     try:
         cfg = get_cfg()
-        log.put({"type": "info", "msg": f"Opening SSH tunnel to {cfg['ssh_host']}..."})
-        tunnel = open_tunnel(cfg)
-        conn = connect_db(tunnel, cfg)
+        log.put({"type": "info", "msg": f"Opening SSH tunnel to {cfg.get('ssh_host_b') or cfg['ssh_host']}..."})
+        tunnel = open_tunnel(cfg, target=True)
+        conn = connect_db(tunnel, cfg, target=True)
         cur = conn.cursor()
+        sub_ids = resolve_subscriber_ids(cur, [pattern])
+        if not sub_ids:
+            log.put({"type": "error", "msg": f"No subscriber found for pattern '{pattern}'."})
+            cur.close(); conn.close(); tunnel.stop()
+            return
+        label = label_for_pattern(cfg, pattern)
         log.put({"type": "info", "msg": "Connected. Watching for new notifications..."})
 
         ext_id = watch_state.get("ext_id")
         mode_msg = f"ext_id={ext_id}" if ext_id else "polling by time"
-        log.put({"type": "info", "msg": f"Connected. Watching ({mode_msg})..."})
+        log.put({"type": "info", "msg": f"Connected. Watching pattern '{pattern}' ({mode_msg})..."})
 
         while watch_state["running"]:
-            rows = fetch_notifications(cur, subscriber_id, since=since, ext_id=ext_id)
+            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
             new = [r for r in rows if r["id"] not in seen]
             for row in new:
                 seen.add(row["id"])
                 results = process_rows([row], mode=watch_state.get("mode", "full"),
-                                       source=watch_state.get("source", "db"))
+                                       source=watch_state.get("source", "db"), label=label)
                 r = results[0]
                 watch_state["results"].append(r)
                 icon   = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
@@ -128,22 +153,25 @@ def full_watch_thread_fn(interval):
             kowl_watch_loop(full_watch_state, interval)
         else:
             cfg = get_cfg()
-            # Build subscriber_id -> flow map from configured subscribers.
+            log.put({"type": "info", "msg": f"Opening SSH tunnel to {cfg.get('ssh_host_b') or cfg['ssh_host']}..."})
+            tunnel = open_tunnel(cfg, target=True)
+            conn = connect_db(tunnel, cfg, target=True)
+            cur = conn.cursor()
+            # Build subscriber_id -> flow map by resolving each configured pattern.
             sub_to_flow, sub_ids = {}, []
-            for flow, cfg_key in FLOW_SUBSCRIBER_KEYS.items():
-                sub = cfg.get(cfg_key)
-                if not sub:
+            for entry in cfg.get("patterns", []):
+                pattern = (entry.get("pattern") or "").strip()
+                if not pattern:
                     continue
-                sub_to_flow[int(sub)] = flow
-                sub_ids.append(int(sub))
+                flow = (entry.get("label") or pattern).strip()
+                for sid in resolve_subscriber_ids(cur, [pattern]):
+                    sub_to_flow[sid] = flow
+                    sub_ids.append(sid)
             if not sub_ids:
-                log.put({"type": "error", "msg": "No subscriber IDs configured. Set them on the Config tab."})
+                log.put({"type": "error", "msg": "No patterns configured (or none matched a subscriber). Set them on the Config tab."})
+                cur.close(); conn.close(); tunnel.stop()
                 return
 
-            log.put({"type": "info", "msg": f"Opening SSH tunnel to {cfg['ssh_host']}..."})
-            tunnel = open_tunnel(cfg)
-            conn = connect_db(tunnel, cfg)
-            cur = conn.cursor()
             flows_str = ", ".join(f"{f}={s}" for s, f in sub_to_flow.items())
             log.put({"type": "info", "msg": f"Connected. Full Run watching all flows ({flows_str}) — trigger your automation now..."})
 
@@ -152,9 +180,10 @@ def full_watch_thread_fn(interval):
                 new = [r for r in rows if r["id"] not in seen]
                 for row in new:
                     seen.add(row["id"])
-                    results = process_rows([row], mode=mode, source=source)
+                    row_label = sub_to_flow.get(row.get("subscriber_id"), "OTHER")
+                    results = process_rows([row], mode=mode, source=source, label=row_label)
                     r = results[0]
-                    r["flow"] = sub_to_flow.get(row.get("subscriber_id"), "OTHER")
+                    r["flow"] = row_label
                     full_watch_state["results"].append(r)
                     icon = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
                     row_ext_id = r.get("ext_id", "")

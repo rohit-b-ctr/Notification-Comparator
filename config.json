@@ -1,16 +1,32 @@
 {
-  "ssh_host": "172.29.28.99",
+  "ssh_host": "172.28.101.13",
+  "db_host": "10.189.242.2",
+  "ssh_host_b": "172.29.28.99",
+  "db_host_b": "10.57.117.79",
   "ssh_port": 22,
   "ssh_user": "rohit_b_ctr_greyorange_com",
-  "db_host": "10.57.117.79",
   "db_port": 5432,
   "db_name": "wms_notification",
   "db_user": "postgres",
   "db_table": "subscriber_history",
-  "subscriber_put": 260,
-  "subscriber_pick": 261,
-  "subscriber_audit": null,
-  "subscriber_other": null,
+  "patterns": [
+    {
+      "label": "Put_Success",
+      "pattern": "service-request-update"
+    },
+    {
+      "label": "Pick_Success",
+      "pattern": "service-request-pick-notification"
+    },
+    {
+      "label": "SR_Cancel",
+      "pattern": "service-request-cancel-success"
+    },
+    {
+      "label": "SR_Failed",
+      "pattern": "service-request-cancel-failed"
+    }
+  ],
   "poll_interval": 3,
   "project": "Columbus",
   "topic_host": "http://192.168.234.12:9003/",
@@ -104,5 +120,9 @@
       "topic": "inventory.forecast.data"
     }
   ],
+  "subscriber_put": 260,
+  "subscriber_pick": 261,
+  "subscriber_audit": null,
+  "subscriber_other": null,
   "secrets_ready": true
 }

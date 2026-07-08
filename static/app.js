@@ -567,12 +567,30 @@ function switchCapSource(src) {
   }
 }
 
+function renderPatternChecks(containerId, patterns) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = patterns.length
+    ? patterns.map((p, i) => `
+        <label style="display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer">
+          <input type="checkbox" class="${containerId}-item" value="${p.pattern}" checked>
+          <span><b>${p.label}</b> — ${p.pattern}</span>
+        </label>`).join('')
+    : '<span style="color:var(--log-fail,#fca5a5)">No patterns configured. Add them on the Config tab.</span>';
+}
+
+function checkedPatterns(containerId) {
+  return Array.from(document.querySelectorAll('.' + containerId + '-item:checked')).map(c => c.value);
+}
+
 async function refreshCaptureProject() {
   try {
     const cfg = await (await fetch('/api/config')).json();
     const p = cfg.project || '(none)';
     document.getElementById('cap-project-label').textContent = p;
     document.getElementById('cap-isd-project').textContent   = p;
+    renderPatternChecks('cap-pattern-checks', cfg.patterns || []);
+    renderPatternChecks('cap-live-pattern-checks', cfg.patterns || []);
   } catch (e) {}
 }
 
@@ -661,10 +679,14 @@ async function doCapture() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Connecting...';
 
-  const subscriber = document.getElementById('cap-subscriber').value;
+  const patterns = checkedPatterns('cap-pattern-checks');
   const since  = capFetchMode === 'time'  ? datetimeLocalToISO(document.getElementById('cap-since').value) : null;
   const ext_id = capFetchMode === 'extid' ? document.getElementById('cap-extid').value.trim() : null;
 
+  if (!patterns.length) {
+    alert('Select at least one pattern (add them on the Config tab if none are listed).');
+    btn.disabled = false; btn.innerHTML = '📸 Capture'; return;
+  }
   if (capFetchMode === 'extid' && !ext_id) {
     alert('Please enter an External Request ID.');
     btn.disabled = false; btn.innerHTML = '📸 Capture'; return;
@@ -674,14 +696,16 @@ async function doCapture() {
     const res = await fetch('/api/capture', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({subscriber, since, ext_id})
+      body: JSON.stringify({patterns, since, ext_id})
     });
     const data = await res.json();
     const el   = document.getElementById('cap-result');
     const body = document.getElementById('cap-result-body');
     el.style.display = 'block';
     if (data.ok) {
+      const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
       body.innerHTML = `
+        ${errs}
         <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} golden snapshot(s) from ${data.total_fetched} notifications.</p>
         ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
       `;
@@ -699,17 +723,18 @@ async function doCapture() {
 let liveCapSSE = null;
 
 async function startLiveCapture() {
-  const subscriber = document.getElementById('cap-live-subscriber').value;
+  const patterns = checkedPatterns('cap-live-pattern-checks');
   const interval   = document.getElementById('cap-live-interval').value;
   const ext_id     = capLiveFetchMode === 'extid' ? document.getElementById('cap-live-extid').value.trim() : null;
 
+  if (!patterns.length) { alert('Select at least one pattern (add them on the Config tab if none are listed).'); return; }
   if (capLiveFetchMode === 'extid' && !ext_id) {
     alert('Please enter an External Request ID.'); return;
   }
 
   const res = await fetch('/api/capture/live/start', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({subscriber, interval, ext_id})
+    body: JSON.stringify({patterns, interval, ext_id})
   });
   const data = await res.json();
   if (!data.ok) { alert(data.error); return; }
@@ -1064,10 +1089,16 @@ async function doCompare() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Comparing...';
 
-  const subscriber = document.getElementById('cmp-subscriber').value;
+  const pattern = document.getElementById('cmp-pattern').value.trim();
   const since  = cmpFetchMode === 'time'  ? datetimeLocalToISO(document.getElementById('cmp-since').value) : null;
   const ext_id = cmpFetchMode === 'extid' ? document.getElementById('cmp-extid').value.trim() : null;
 
+  if (!pattern) {
+    alert('Please enter a pattern.');
+    btn.disabled = false;
+    btn.innerHTML = '🔍 Compare';
+    return;
+  }
   if (cmpFetchMode === 'time' && !since) {
     alert('Please set a Since time or use By Request ID mode.');
     btn.disabled = false;
@@ -1085,7 +1116,7 @@ async function doCompare() {
     const res = await fetch('/api/compare', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({subscriber, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
+      body: JSON.stringify({pattern, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
     });
     const data = await res.json();
 
@@ -1132,7 +1163,6 @@ function watchDataOrigin() {
 function updateWatchControls() {
   const kowl = watchDataOrigin() === 'kowl';
   document.getElementById('watch-fetch-tabs').style.display = kowl ? 'none' : 'flex';
-  document.getElementById('watch-flow-block').style.display = kowl ? 'none' : 'block';
   document.getElementById('watch-sub-wrap').style.display   = kowl ? 'none' : 'block';
   document.getElementById('watch-kowl-note').style.display  = kowl ? 'block' : 'none';
   if (kowl && !document.getElementById('watch-fetch-panel-extid').style.display)
@@ -1157,7 +1187,7 @@ function setWatchIsdData(src) {
 }
 
 async function startWatch() {
-  const subscriber = document.getElementById('watch-subscriber').value;
+  const pattern = document.getElementById('watch-pattern').value.trim();
   const interval   = document.getElementById('watch-interval').value;
 
   let data;
@@ -1165,7 +1195,7 @@ async function startWatch() {
     const res = await fetch('/api/watch/start', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
-        subscriber, interval, mode: modeState.watch, golden_source: watchGolden,
+        pattern, interval, mode: modeState.watch, golden_source: watchGolden,
         data_source: watchGolden === 'isd' ? watchIsdData : undefined,
         ext_id: watchFetchMode === 'extid' ? document.getElementById('watch-extid').value.trim() : null
       })
@@ -1299,21 +1329,18 @@ function toggleMode(prefix) {
   }
 }
 
-// ── Subscriber ID map (populated from config) ────────────────────────────────
-let subscriberIds = {PUT: null, PICK: null, AUDIT: null, OTHER: null};
+function parsePatternsTextarea(text) {
+  return (text || '').split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+    const i = line.indexOf('=');
+    if (i === -1) return {label: line, pattern: line};
+    return {label: line.slice(0, i).trim() || line.slice(i + 1).trim(), pattern: line.slice(i + 1).trim()};
+  }).filter(p => p.pattern);
+}
 
-function selectFlowType(prefix, type) {
-  // Highlight the chosen pill
-  const pillsEl = document.getElementById(prefix + '-flow-pills');
-  if (pillsEl) {
-    pillsEl.querySelectorAll('.flow-pill').forEach(p => {
-      p.classList.toggle('active', p.dataset.flow === type);
-    });
-  }
-  // Auto-fill subscriber ID if configured
-  const inp = document.getElementById(prefix + '-subscriber');
-  const val = subscriberIds[type];
-  if (inp && val) inp.value = val;
+function refreshPatternsDatalist(patterns) {
+  const dl = document.getElementById('cfg-patterns-datalist');
+  if (!dl) return;
+  dl.innerHTML = (patterns || []).map(p => `<option value="${p.pattern}">${p.label}</option>`).join('');
 }
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -1325,9 +1352,11 @@ async function loadConfig() {
   } catch (e) { console.error('Failed to load config:', e); return; }
   // non-secret fields from disk
   document.getElementById('cfg-ssh-host').value  = cfg.ssh_host  || '';
+  document.getElementById('cfg-ssh-host-b').value = cfg.ssh_host_b || '';
   document.getElementById('cfg-ssh-port').value  = cfg.ssh_port  || 22;
   document.getElementById('cfg-ssh-user').value  = cfg.ssh_user  || '';
   document.getElementById('cfg-db-host').value   = cfg.db_host   || '';
+  document.getElementById('cfg-db-host-b').value = cfg.db_host_b || '';
   document.getElementById('cfg-db-port').value   = cfg.db_port   || 5432;
   document.getElementById('cfg-db-name').value   = cfg.db_name   || '';
   document.getElementById('cfg-db-table').value  = cfg.db_table  || '';
@@ -1356,20 +1385,14 @@ async function loadConfig() {
     count:    cfg.topic_count    || 50,
     topics:   cfg.topics || [],
   };
-  // per-flow subscriber IDs
-  document.getElementById('cfg-sub-put').value   = cfg.subscriber_put   || '';
-  document.getElementById('cfg-sub-pick').value  = cfg.subscriber_pick  || '';
-  document.getElementById('cfg-sub-audit').value = cfg.subscriber_audit || '';
-  document.getElementById('cfg-sub-other').value = cfg.subscriber_other || '';
-  subscriberIds = {
-    PUT:   cfg.subscriber_put   || null,
-    PICK:  cfg.subscriber_pick  || null,
-    AUDIT: cfg.subscriber_audit || null,
-    OTHER: cfg.subscriber_other || null,
-  };
+  // notification patterns
+  document.getElementById('cfg-patterns').value =
+    (cfg.patterns || []).map(p => `${p.label} = ${p.pattern}`).join('\n');
+  refreshPatternsDatalist(cfg.patterns || []);
   // secrets — never pre-filled, always blank on load
   document.getElementById('cfg-ssh-key').value  = '';
   document.getElementById('cfg-db-pass').value  = '';
+  document.getElementById('cfg-db-pass-b').value = '';
   // show banner if secrets not yet set
   document.getElementById('cfg-secrets-banner').style.display = cfg.secrets_ready ? 'none' : 'block';
   // check if secrets were auto-loaded from .secrets file
@@ -1392,13 +1415,14 @@ async function checkSavedSecretsStatus() {
 }
 
 async function saveSecrets() {
-  const btn      = document.getElementById('cfg-secrets-btn');
-  const status   = document.getElementById('cfg-secrets-status');
-  const ssh_key  = document.getElementById('cfg-ssh-key').value.trim();
-  const db_pass  = document.getElementById('cfg-db-pass').value;
-  const saveDisk = document.getElementById('cfg-save-disk').checked;
+  const btn       = document.getElementById('cfg-secrets-btn');
+  const status    = document.getElementById('cfg-secrets-status');
+  const ssh_key   = document.getElementById('cfg-ssh-key').value.trim();
+  const db_pass   = document.getElementById('cfg-db-pass').value;
+  const db_pass_b = document.getElementById('cfg-db-pass-b').value;
+  const saveDisk  = document.getElementById('cfg-save-disk').checked;
 
-  if (!ssh_key && !db_pass) {
+  if (!ssh_key && !db_pass && !db_pass_b) {
     status.textContent = '❌ Enter a password and/or SSH key';
     status.style.color = '#fca5a5';
     return;
@@ -1406,7 +1430,7 @@ async function saveSecrets() {
   btn.disabled = true;
   const res  = await fetch('/api/secrets', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ssh_key, db_pass, save_to_disk: saveDisk})
+    body: JSON.stringify({ssh_key, db_pass, db_pass_b, save_to_disk: saveDisk})
   });
   const data = await res.json();
   if (data.ok) {
@@ -1416,6 +1440,7 @@ async function saveSecrets() {
     document.getElementById('cfg-secrets-banner').style.display = 'none';
     document.getElementById('cfg-ssh-key').value  = '';
     document.getElementById('cfg-db-pass').value  = '';
+    document.getElementById('cfg-db-pass-b').value = '';
     document.getElementById('cfg-save-disk').checked = false;
     checkSavedSecretsStatus();
   } else {
@@ -1436,18 +1461,15 @@ async function clearSavedSecrets() {
 async function saveConfig(silent = false) {
   const btn    = document.getElementById('cfg-save-btn');
   const status = document.getElementById('cfg-status');
-  const errEl  = document.getElementById('cfg-sub-error');
+  const errEl  = document.getElementById('cfg-pattern-error');
 
-  const subPut   = document.getElementById('cfg-sub-put').value.trim();
-  const subPick  = document.getElementById('cfg-sub-pick').value.trim();
-  const subAudit = document.getElementById('cfg-sub-audit').value.trim();
-  const subOther = document.getElementById('cfg-sub-other').value.trim();
+  const patterns = parsePatternsTextarea(document.getElementById('cfg-patterns').value);
 
-  // At least one subscriber ID required
-  if (!subPut && !subPick && !subAudit && !subOther) {
+  // At least one pattern required
+  if (!patterns.length) {
     errEl.style.display = 'block';
     if (!silent) {
-      status.textContent = '❌ At least one subscriber ID is required';
+      status.textContent = '❌ At least one pattern is required';
       status.style.color = '#fca5a5';
     }
     return false;
@@ -1457,17 +1479,16 @@ async function saveConfig(silent = false) {
   btn.disabled = true;
   const payload = {
     ssh_host:          document.getElementById('cfg-ssh-host').value,
+    ssh_host_b:        document.getElementById('cfg-ssh-host-b').value,
     ssh_port:          document.getElementById('cfg-ssh-port').value,
     ssh_user:          document.getElementById('cfg-ssh-user').value,
     db_host:           document.getElementById('cfg-db-host').value,
+    db_host_b:         document.getElementById('cfg-db-host-b').value,
     db_port:           document.getElementById('cfg-db-port').value,
     db_name:           document.getElementById('cfg-db-name').value,
     db_table:          document.getElementById('cfg-db-table').value,
     db_user:           document.getElementById('cfg-db-user').value,
-    subscriber_put:    subPut   || null,
-    subscriber_pick:   subPick  || null,
-    subscriber_audit:  subAudit || null,
-    subscriber_other:  subOther || null,
+    patterns:          patterns,
     poll_interval:     document.getElementById('cfg-poll').value,
     project:           document.getElementById('cfg-project').value.trim(),
     topic_host:        document.getElementById('cfg-topic-host').value.trim(),
@@ -1489,19 +1510,14 @@ async function saveConfig(silent = false) {
     setTimeout(() => status.textContent = '', 3000);
   }
   if (data.ok) {
-    subscriberIds = {
-      PUT:   subPut   ? parseInt(subPut)   : null,
-      PICK:  subPick  ? parseInt(subPick)  : null,
-      AUDIT: subAudit ? parseInt(subAudit) : null,
-      OTHER: subOther ? parseInt(subOther) : null,
-    };
+    refreshPatternsDatalist(patterns);
     document.getElementById('watch-interval').value = payload.poll_interval;
   }
   return data.ok;
 }
 
-async function testConnection() {
-  const btn    = document.getElementById('cfg-test-btn');
+async function testConnection(target = false) {
+  const btn    = document.getElementById(target ? 'cfg-test-btn-b' : 'cfg-test-btn');
   const status = document.getElementById('cfg-status');
   // Save first (with validation) — if save fails, abort
   const saved = await saveConfig(true);
@@ -1509,7 +1525,10 @@ async function testConnection() {
   btn.disabled = true;
   status.textContent = '🔄 Testing...';
   status.style.color = '#93c5fd';
-  const res  = await fetch('/api/config/test', {method:'POST'});
+  const res  = await fetch('/api/config/test', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({target})
+  });
   const data = await res.json();
   status.textContent = data.msg;
   status.style.color = data.ok ? '#86efac' : '#fca5a5';
@@ -1976,7 +1995,7 @@ function renderRunAll(data) {
   document.getElementById('runall-perflow').innerHTML = Object.keys(pf).length
     ? Object.entries(pf).map(([flow,s]) =>
         `<span class="badge badge-info" style="margin-right:8px">${flow}: ${s.pass}/${s.total} pass${s.fail?`, ${s.fail} fail`:''}</span>`).join('')
-    : '<span style="color:#fcd34d;font-size:12px">No subscriber IDs configured — set them on the Config tab.</span>';
+    : '<span style="color:#fcd34d;font-size:12px">No patterns configured — set them on the Config tab.</span>';
 
   if (data.report) {
     const dl = document.getElementById('runall-download');
@@ -1995,44 +2014,66 @@ function renderRunAll(data) {
   });
 }
 
+let _allReports = [];
+
 async function loadReports() {
   try {
-    const reports = await (await fetch('/api/reports')).json();
-    const el = document.getElementById('dash-reports');
-    if (!el) return;
-    el.innerHTML = reports.length
-      ? reports.map(rep => {
-          const n = rep.name;
-          const hasMeta = (rep.total !== undefined);
-          const kindIcon = rep.kind === 'full_run' ? '▶' : (rep.kind === 'run_all' ? '📅' : '⇄');
-          const title = hasMeta
-            ? `<b>${rep.project || '(none)'}</b> · ${rep.created || ''}`
-            : `${n} <span style="color:#475569">· ${rep.created || ''}</span>`;
-          const counts = hasMeta
-            ? `<span style="margin-left:10px;font-size:11px">
-                 <span style="color:var(--log-pass,#86efac)">✅ ${rep.pass}</span>
-                 <span style="color:var(--log-fail,#fca5a5);margin-left:6px">❌ ${rep.fail}</span>
-                 <span style="color:var(--text-muted);margin-left:6px">/ ${rep.total}</span>
-                 ${rep.mode ? `<span class="badge badge-info" style="margin-left:8px">${rep.mode}</span>` : ''}
-               </span>`
-            : '';
-          const allureBtns =
-            (rep.allure_html ? `<a class="btn-xs btn-xs-view" style="background:#14532d;color:var(--log-pass,#86efac)" href="/api/allure-html/${rep.allure_html.replace('-html','')}/" target="_blank" title="Open Allure HTML report">📊 Allure</a>` : '') +
-            (rep.allure_zip ? `<a class="btn-xs btn-xs-view" href="/api/allure/${encodeURIComponent(rep.allure_zip)}" download title="Download allure-results (.zip)">📦 .zip</a>` : '');
-          return `
-          <div class="golden-item">
-            <span class="golden-name"><input type="checkbox" class="rep-check" value="${n}" onchange="updateReportSelCount()">${kindIcon} ${title} ${counts}</span>
-            <div class="golden-actions">
-              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}" target="_blank">Open</a>
-              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}?download=1" download>Download</a>
-              ${allureBtns}
-              <button class="btn-xs btn-xs-del" onclick="deleteReport('${n}')">Delete</button>
-            </div>
-          </div>`;
-        }).join('')
-      : 'No reports yet.';
-    updateReportSelCount();
+    _allReports = await (await fetch('/api/reports')).json();
+    renderReports();
   } catch (e) {}
+}
+
+function renderReports() {
+  const el = document.getElementById('dash-reports');
+  if (!el) return;
+  const searchEl = document.getElementById('rep-search');
+  const sortEl   = document.getElementById('rep-sort');
+  const q    = (searchEl ? searchEl.value : '').trim().toLowerCase();
+  const sort = sortEl ? sortEl.value : 'time-desc';
+
+  let reports = _allReports.filter(rep =>
+    !q || rep.name.toLowerCase().includes(q) || (rep.project || '').toLowerCase().includes(q));
+
+  reports = reports.slice().sort((a, b) => {
+    if (sort === 'name-asc')  return a.name.localeCompare(b.name);
+    if (sort === 'name-desc') return b.name.localeCompare(a.name);
+    if (sort === 'time-asc')  return (a.id || 0) - (b.id || 0);
+    return (b.id || 0) - (a.id || 0);  // time-desc (default, newest first)
+  });
+
+  el.innerHTML = reports.length
+    ? reports.map(rep => {
+        const n = rep.name;
+        const hasMeta = (rep.total !== undefined);
+        const kindIcon = rep.kind === 'full_run' ? '▶' : (rep.kind === 'run_all' ? '📅' : '⇄');
+        const idBadge = `<span class="badge badge-info" style="margin-right:8px">#${rep.id ?? '?'}</span>`;
+        const title = hasMeta
+          ? `<b>${rep.project || '(none)'}</b> · ${rep.created || ''}`
+          : `${n} <span style="color:#475569">· ${rep.created || ''}</span>`;
+        const counts = hasMeta
+          ? `<span style="margin-left:10px;font-size:11px">
+               <span style="color:var(--log-pass,#86efac)">✅ ${rep.pass}</span>
+               <span style="color:var(--log-fail,#fca5a5);margin-left:6px">❌ ${rep.fail}</span>
+               <span style="color:var(--text-muted);margin-left:6px">/ ${rep.total}</span>
+               ${rep.mode ? `<span class="badge badge-info" style="margin-left:8px">${rep.mode}</span>` : ''}
+             </span>`
+          : '';
+        const allureBtns =
+          (rep.allure_html ? `<a class="btn-xs btn-xs-view" style="background:#14532d;color:var(--log-pass,#86efac)" href="/api/allure-html/${rep.allure_html.replace('-html','')}/" target="_blank" title="Open Allure HTML report">📊 Allure</a>` : '') +
+          (rep.allure_zip ? `<a class="btn-xs btn-xs-view" href="/api/allure/${encodeURIComponent(rep.allure_zip)}" download title="Download allure-results (.zip)">📦 .zip</a>` : '');
+        return `
+        <div class="golden-item">
+          <span class="golden-name"><input type="checkbox" class="rep-check" value="${n}" onchange="updateReportSelCount()">${idBadge}${kindIcon} ${title} ${counts}</span>
+          <div class="golden-actions">
+            <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}" target="_blank">Open</a>
+            <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}?download=1" download>Download</a>
+            ${allureBtns}
+            <button class="btn-xs btn-xs-del" onclick="deleteReport('${n}')">Delete</button>
+          </div>
+        </div>`;
+      }).join('')
+    : (_allReports.length ? 'No reports match your search.' : 'No reports yet.');
+  updateReportSelCount();
 }
 
 function selectedReportNames() {

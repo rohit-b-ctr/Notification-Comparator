@@ -10,21 +10,26 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
 # Fields that are NEVER written to disk — must be entered in UI each session
-SECRET_FIELDS = {"db_pass", "ssh_key"}
+SECRET_FIELDS = {"db_pass", "db_pass_b", "ssh_key"}
 
 DEFAULT_CONFIG = {
+    # Baseline: where goldens are captured from.
     "ssh_host": "172.29.32.137",
+    "db_host":  "10.57.117.201",
+    # Target: what live traffic is compared against those goldens.
+    "ssh_host_b": "172.29.32.137",
+    "db_host_b":  "10.57.117.201",
+    # Shared across baseline + target.
     "ssh_port": 22,
     "ssh_user": "rohit_b_ctr_greyorange_com",
-    "db_host":  "10.57.117.201",
     "db_port":  5432,
     "db_name":  "wms_notification",
     "db_user":  "postgres",
     "db_table": "subscriber_history",
-    "subscriber_put":   None,
-    "subscriber_pick":  None,
-    "subscriber_audit": None,
-    "subscriber_other": None,
+    # Notification patterns: each maps a human label to a `subscriber.pattern`
+    # value; the app looks up subscriber.id for that pattern, then queries
+    # db_table by subscriber_id. Add as many as you need — no fixed categories.
+    "patterns": [],
     "poll_interval": 3,
     # ── Golden categorization ──
     "project": "",                       # current project — golden saved under golden/{project}/...
@@ -43,8 +48,9 @@ DEFAULT_CONFIG = {
 
 # In-memory only — never persisted to disk
 RUNTIME_SECRETS = {
-    "db_pass": "",
-    "ssh_key": "",
+    "db_pass":   "",  # baseline DB password
+    "db_pass_b": "",  # target DB password
+    "ssh_key":   "",  # shared SSH key for both baseline and target
 }
 
 def parse_int(value, default=None):
@@ -96,6 +102,8 @@ def load_saved_secrets():
             data = json.loads(SECRETS_PATH.read_text())
             if data.get("db_pass"):
                 RUNTIME_SECRETS["db_pass"] = data["db_pass"]
+            if data.get("db_pass_b"):
+                RUNTIME_SECRETS["db_pass_b"] = data["db_pass_b"]
             if data.get("ssh_key"):
                 RUNTIME_SECRETS["ssh_key"] = data["ssh_key"]
             return True
@@ -103,8 +111,8 @@ def load_saved_secrets():
             pass
     return False
 
-def save_secrets_to_disk(db_pass, ssh_key):
-    SECRETS_PATH.write_text(json.dumps({"db_pass": db_pass, "ssh_key": ssh_key}))
+def save_secrets_to_disk(db_pass, ssh_key, db_pass_b=""):
+    SECRETS_PATH.write_text(json.dumps({"db_pass": db_pass, "ssh_key": ssh_key, "db_pass_b": db_pass_b}))
 
 def clear_saved_secrets():
     if SECRETS_PATH.exists():
