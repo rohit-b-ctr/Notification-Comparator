@@ -1,10 +1,26 @@
 """SSH tunnel + Postgres access."""
 import os
+import socket
 
 import psycopg2  # type: ignore[import]
 import sshtunnel  # type: ignore[import]
 
 from core.config import get_cfg
+
+SSH_CONNECT_TIMEOUT = 6  # seconds
+
+def _check_reachable(host, port, timeout=SSH_CONNECT_TIMEOUT):
+    """Fail fast with a clear error instead of the multi-minute OS-level hang
+    sshtunnel is prone to: it opens the initial TCP connection from a plain
+    (host, port) tuple, which paramiko/sshtunnel never applies a connect
+    timeout to (only pre-made sockets/proxies get one) — so an unreachable
+    gateway silently blocks for a long time before failing."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except OSError as e:
+        raise RuntimeError(f"Cannot reach SSH host {host}:{port} — {e}. "
+                           f"Check VPN/network connectivity.") from e
 
 def open_tunnel(cfg=None, target=False):
     """target=False -> baseline host (where goldens are captured from).
@@ -13,8 +29,10 @@ def open_tunnel(cfg=None, target=False):
     cfg = cfg or get_cfg()
     ssh_host = (cfg.get("ssh_host_b") or cfg["ssh_host"]) if target else cfg["ssh_host"]
     db_host  = (cfg.get("db_host_b")  or cfg["db_host"])  if target else cfg["db_host"]
+    ssh_port = int(cfg["ssh_port"])
+    _check_reachable(ssh_host, ssh_port)
     t = sshtunnel.SSHTunnelForwarder(
-        (ssh_host, int(cfg["ssh_port"])),
+        (ssh_host, ssh_port),
         ssh_username=cfg["ssh_user"],
         ssh_pkey=os.path.expanduser(cfg["ssh_key"]),
         remote_bind_address=(db_host, int(cfg["db_port"])),

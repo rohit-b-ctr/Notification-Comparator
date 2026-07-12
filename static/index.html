@@ -287,6 +287,19 @@
         </div>
       </div>
 
+      <div class="card" id="tc-cap-result" style="display:none">
+        <div class="card-title">Stored baseline keys</div>
+        <div id="tc-cap-result-body"></div>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div class="card-title" style="margin:0">Current baseline (<span id="tc-baseline-count">0</span> keys)</div>
+          <button class="btn btn-ghost" onclick="loadTopicBaselines()">↻ Refresh</button>
+        </div>
+        <div id="tc-baseline-list"><div class="no-results">No baseline captured yet.</div></div>
+      </div>
+    </div>
+
       <div class="card">
         <div class="card-title">⚡ Live Capture</div>
         <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px">Click <b>Start</b>, then run your flow. Every new Kowl topic message is saved as kowl golden (one per state/key, latest wins) until you click <b>Stop</b>.</p>
@@ -304,18 +317,7 @@
         <div class="log-box" id="kc-log" style="display:none;margin-top:12px"></div>
       </div>
 
-      <div class="card" id="tc-cap-result" style="display:none">
-        <div class="card-title">Stored baseline keys</div>
-        <div id="tc-cap-result-body"></div>
-      </div>
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <div class="card-title" style="margin:0">Current baseline (<span id="tc-baseline-count">0</span> keys)</div>
-          <button class="btn btn-ghost" onclick="loadTopicBaselines()">↻ Refresh</button>
-        </div>
-        <div id="tc-baseline-list"><div class="no-results">No baseline captured yet.</div></div>
-      </div>
-    </div>
+      
 
     <!-- SOURCE: ISD -->
     <div id="cap-src-isd" style="display:none">
@@ -874,9 +876,12 @@
         </div>
       </div>
 
-      <!-- Topics textarea -->
-      <label style="margin-bottom:6px">Topics <span style="color:#4a3a6a;font-weight:400">— one per line, format: <code style="color:#a78bfa">LABEL = topic-suffix</code></span></label>
-      <textarea id="cfg-topics" rows="5" class="mono-textarea" placeholder="Item Create = item-create.requests&#10;Item Response = item-create.responses"></textarea>
+      <!-- Topics textarea (drag the bottom-right corner to resize) -->
+      <label style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+        <span>Topics <span style="color:#4a3a6a;font-weight:400">— one per line, format: <code style="color:#a78bfa">LABEL = topic-suffix</code></span></span>
+        <span id="cfg-topics-count" style="font-size:11px;color:#4a3a6a;font-weight:400"></span>
+      </label>
+      <textarea id="cfg-topics" rows="5" class="mono-textarea" placeholder="Item Create = item-create.requests&#10;Item Response = item-create.responses" style="min-height:110px" oninput="updateTopicsCount()"></textarea>
 
       <!-- Kowl actions -->
       <div style="display:flex;gap:10px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid #2d1a4f">

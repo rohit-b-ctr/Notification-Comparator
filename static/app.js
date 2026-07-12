@@ -1377,6 +1377,7 @@ async function loadConfig() {
   document.getElementById('cfg-topic-count').value    = cfg.topic_count    || 50;
   document.getElementById('cfg-topics').value =
     (cfg.topics || []).map(t => `${t.label} = ${t.topic}`).join('\n');
+  updateTopicsCount();
   topicCfg = {
     host:     cfg.topic_host     || '',
     host_b:   cfg.topic_host_b   || '',
@@ -1640,6 +1641,11 @@ function parseTopicsTextarea(text) {
     if (i === -1) return {label: 'TOPIC', topic: line};
     return {label: line.slice(0, i).trim() || 'TOPIC', topic: line.slice(i + 1).trim()};
   }).filter(t => t.topic);
+}
+
+function updateTopicsCount() {
+  const el = document.getElementById('cfg-topics-count');
+  if (el) el.textContent = parseTopicsTextarea(document.getElementById('cfg-topics').value).length;
 }
 
 function setTopicMode(m) {

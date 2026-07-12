@@ -32,6 +32,13 @@ def _safe_folder(name):
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name).strip("_")
     return safe or "OTHER"
 
+def _safe_folder_path(label):
+    """Sanitize a label that may itself contain '/' into a nested folder path,
+    e.g. 'Create/Cancel Request Message/service-request-create' -> each
+    segment sanitized individually, '/' preserved as the directory separator."""
+    parts = [_safe_folder(p) for p in label.split("/") if p.strip()]
+    return "/".join(parts) if parts else "OTHER"
+
 def golden_path(key, source="db", label=None):
     """Write path: golden/{project}/{source}/{FOLDER}/{key}.json
 
@@ -39,9 +46,10 @@ def golden_path(key, source="db", label=None):
     'service-request-cancel-success' pattern always files under its own
     label folder, never under the internal notification 'type' field it
     happens to carry, like PUT) — otherwise falls back to the legacy
-    behaviour of deriving the folder from the key's type prefix.
+    behaviour of deriving the folder from the key's type prefix. `label` may
+    contain '/' for nested folders (e.g. topic label + message name).
     """
-    flow_type = _safe_folder(label) if label else key.split("__")[0].upper()
+    flow_type = _safe_folder_path(label) if label else key.split("__")[0].upper()
     return golden_root() / source / flow_type / f"{key}.json"
 
 def save_golden(key, payload, source="db", label=None):
@@ -60,7 +68,7 @@ def load_golden(key, source=None, label=None):
                        resolve.
     """
     flow_type = key.split("__")[0].upper()
-    label_folder = _safe_folder(label) if label else None
+    label_folder = _safe_folder_path(label) if label else None
     if source:
         candidates = []
         if label_folder:

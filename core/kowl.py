@@ -89,13 +89,39 @@ def sr_type_path(env):
             paths.append(path)
     return "+".join(paths)
 
+def payload_type_signature(env):
+    """Extract a 'type' signature from the payload, whichever shape it's in:
+      - payload is a dict with a top-level 'type' field, e.g. {"type": "PUT", ...}
+      - payload is a list of dicts each carrying their own 'type', e.g. [{"type": "PICK"}, ...]
+    Returns '' when no type info is present. Without this, two messages under
+    the same name/state (e.g. two 'service-request-cancel' envelopes, one
+    type PICK and one type PUT) would collapse into the same golden key and
+    silently overwrite each other."""
+    payload = env.get("payload")
+    if isinstance(payload, dict):
+        t = payload.get("type")
+        return str(t).strip().upper() if t else ""
+    if isinstance(payload, list):
+        types = []
+        for item in payload:
+            if isinstance(item, dict):
+                t = item.get("type")
+                t = str(t).strip().upper() if t else ""
+                if t and t not in types:
+                    types.append(t)
+        return "+".join(types)
+    return ""
+
 def topic_notif_key(env, label, topic):
-    """Pairing key across setups: {LABEL}__{name}__{state}[__{sr_type_path}]."""
+    """Pairing key across setups: {LABEL}__{name}__{state}[__{type}][__{sr_type_path}]."""
     name  = env.get("name") or topic_short(topic)
     inner = env.get("payload") if isinstance(env.get("payload"), dict) else {}
     state = (inner.get("state") or env.get("state")
              or inner.get("status") or env.get("status") or "all")
     key = f"{label}__{name}__{str(state).strip().lower()}"
+    type_sig = payload_type_signature(env)
+    if type_sig:
+        key += f"__{type_sig}"
     sr_path = sr_type_path(env)
     if sr_path:
         key += f"__{sr_path}"
@@ -203,17 +229,33 @@ def message_envelope(msg):
     val = msg.get("value") or {}
     return val.get("payload")
 
-# Kowl baselines are golden data: stored under golden/{project}/kowl/{FLOW}/{key}.json
+def _kowl_label_path(key):
+    """{configured_label}/{message_name} folder path, derived from a topic
+    key's own first two '__'-separated segments. A single topic config entry
+    (e.g. label 'Create/Cancel Request Message' on topic
+    'service-request.requests') can carry multiple distinct message names
+    (service-request-create, service-request-cancel, ...) — this keeps each
+    one in its own subfolder instead of lumping them together under the
+    shared label."""
+    parts = key.split("__")
+    return "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+# Kowl baselines are golden data: stored under golden/{project}/kowl/{LABEL}/{NAME}/{key}.json
 def topic_baseline_path(key):
-    return golden_path(key, source="kowl")
+    return golden_path(key, source="kowl", label=_kowl_label_path(key))
 
 def save_topic_baseline(key, payload):
-    save_golden(key, payload, source="kowl")
+    save_golden(key, payload, source="kowl", label=_kowl_label_path(key))
 
 def load_topic_baseline(key):
     p = topic_baseline_path(key)
     if p.exists():
         return json.loads(p.read_text())
+    # fall back to the pre-split layout (one folder per label, not per label/name)
+    # so baselines captured before this change still resolve
+    legacy_nested = golden_path(key, source="kowl")
+    if legacy_nested.exists():
+        return json.loads(legacy_nested.read_text())
     # fallback to the legacy flat store for baselines captured before this change
     legacy = TOPIC_DIR / f"{key}.json"
     return json.loads(legacy.read_text()) if legacy.exists() else None
@@ -290,7 +332,10 @@ def kowl_capture_thread(host, interval):
     Mirrors the DB 'Live Poll & Capture' flow."""
     cfg    = load_config()
     count  = int(cfg.get("topic_count") or 50)
-    topics = cfg.get("topics", [])
+    # Baseline capture always prepends the configured env prefix (e.g. "aph.") to
+    # each topic suffix — this live-poll variant was missing that step, so it
+    # queried bare suffixes that don't exist on the cluster (UNKNOWN_TOPIC_OR_PARTITION).
+    topics = apply_prefix(cfg.get("topics", []), (cfg.get("topic_prefix") or "").strip())
     log    = kowl_capture_state["log_queue"]
     if not host:
         log.put({"type": "error", "msg": "No Kowl host configured (Config tab)."})
@@ -373,7 +418,11 @@ def compare_kowl_env(env, label, topic, mode, golden_source, row_id):
     return {**base, "status": "PASS" if not findings else "FAIL",
             "findings": findings, "payload": payload}
 
-_FETCH_TIMEOUT = 15  # seconds — hard wall-clock limit per topic fetch
+_FETCH_TIMEOUT = 25  # seconds — outer wall-clock limit; must stay > fetch_topic_messages'
+                     # own hard_timeout (20s default) so that inner timeout — which already
+                     # returns whatever messages it collected — gets a chance to finish and
+                     # hand back partial results, instead of this outer wrapper cutting it off
+                     # first and discarding a fetch that was actually working, just slow.
 
 def _fetch_with_timeout(host, topic, count):
     """Run fetch_topic_messages in a daemon thread; raise if it hangs past _FETCH_TIMEOUT."""
@@ -383,7 +432,8 @@ def _fetch_with_timeout(host, topic, count):
     try:
         return fut.result(timeout=_FETCH_TIMEOUT)
     except FuturesTimeoutError:
-        raise RuntimeError(f"Timed out after {_FETCH_TIMEOUT}s — topic may not exist on this cluster")
+        raise RuntimeError(f"No response from Kowl for '{topic}' within {_FETCH_TIMEOUT}s — "
+                           f"the cluster may be slow or the topic may have no recent messages")
 
 _STATUS_RANK = {"PASS": 0, "FAIL": 1, "ERROR": 2, "NO GOLDEN": 3}
 

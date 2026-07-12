@@ -66,8 +66,14 @@ def diff_to_list(diff, mode="full"):
             continue
         if change_type in ("dictionary_item_added", "dictionary_item_removed",
                            "iterable_item_added", "iterable_item_removed"):
+            # DeepDiff(golden, payload) — "removed" means present in golden (t1) and
+            # missing from the actual payload (t2); "added" means the reverse.
+            # Spell that out instead of the raw DeepDiff jargon.
+            is_removed = change_type.endswith("_removed")
+            label = "Missing Field" if is_removed else "Extra Field"
+            detail = "Present in the Golden Data but not in the Target Environment." if is_removed else "Not in Golden Data but Present in the Target Environment."
             for path in changes:
-                out.append({"type": change_type.replace("_", " "), "path": str(path), "detail": ""})
+                out.append({"type": label, "path": str(path), "detail": detail})
         elif change_type in ("values_changed", "type_changes"):
             for path, info in changes.items():
                 if change_type == "values_changed":

@@ -66,7 +66,7 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
     rows = []
-    for r in results:
+    for i, r in enumerate(results):
         st = r["status"]
         color = {"PASS": "#16a34a", "FAIL": "#dc2626"}.get(st, "#b45309")
         findings = "".join(
@@ -86,13 +86,19 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
                 + color_payload_html(r["payload"], r.get("findings", []))
                 + '</pre></details>'
             )
+        rid = f"row{i}"
         rows.append(f"""
-        <tr style="border-bottom:1px solid #e5e7eb">
+        <tr class="notif-row" data-status="{esc(st)}" onclick="toggleNotif('{rid}')" style="border-bottom:1px solid #e5e7eb;cursor:pointer">
+          <td style="padding:8px;font-size:11px;color:#94a3b8;width:18px" id="{rid}-arrow">▸</td>
           <td style="padding:8px;font-family:monospace;font-size:12px">{esc(r.get('db_id',''))}</td>
           <td style="padding:8px;font-family:monospace;font-size:12px">{esc(r.get('key',''))}</td>
           <td style="padding:8px;font-family:monospace;font-size:11px;color:#6b7280">{esc(r.get('ext_id','') or '—')}</td>
           <td style="padding:8px"><b style="color:{color}">{esc(st)}</b></td>
-          <td style="padding:8px">{findings}</td>
+          <td style="padding:8px;font-size:11px;color:#94a3b8">{len(r.get('findings', []))} finding(s)</td>
+        </tr>
+        <tr class="notif-detail" data-status="{esc(st)}" id="{rid}-detail" style="display:none;border-bottom:1px solid #e5e7eb">
+          <td></td>
+          <td colspan="5" style="padding:0 8px 12px">{findings}</td>
         </tr>""")
 
     meta_rows = "".join(
@@ -133,15 +139,72 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
     </div>
   </div>
   <div style="display:flex;gap:12px;margin-bottom:20px">
-    <div style="flex:1;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700">{total}</div><div style="font-size:11px;color:#64748b">TOTAL</div></div>
-    <div style="flex:1;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
-    <div style="flex:1;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
-    <div style="flex:1;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
+    <div class="stat-tile" data-filter="all" onclick="filterNotifs('all')" style="flex:1;background:#fff;border:2px solid #0f172a;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700">{total}</div><div style="font-size:11px;color:#64748b">TOTAL</div></div>
+    <div class="stat-tile" data-filter="PASS" onclick="filterNotifs('PASS')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
+    <div class="stat-tile" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
+    <div class="stat-tile" data-filter="other" onclick="filterNotifs('other')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:10px;font-size:12px;color:#64748b;align-items:center">
+    <span>Filter:</span>
+    <button class="filter-btn" data-filter="all" onclick="filterNotifs('all')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#0f172a;color:#fff;cursor:pointer;font-size:12px">All</button>
+    <button class="filter-btn" data-filter="PASS" onclick="filterNotifs('PASS')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#16a34a;cursor:pointer;font-size:12px">Pass</button>
+    <button class="filter-btn" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#dc2626;cursor:pointer;font-size:12px">Fail</button>
+    <button class="filter-btn" data-filter="other" onclick="filterNotifs('other')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#b45309;cursor:pointer;font-size:12px">Other</button>
+    <button onclick="expandAll()" style="margin-left:12px;padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Expand all</button>
+    <button onclick="collapseAll()" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Collapse all</button>
   </div>
   <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-    <thead><tr style="background:#f1f5f9;text-align:left"><th style="padding:8px;font-size:11px;color:#64748b">ID</th><th style="padding:8px;font-size:11px;color:#64748b">KEY</th><th style="padding:8px;font-size:11px;color:#64748b">REQUEST ID</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
-    <tbody>{''.join(rows)}</tbody>
+    <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">ID</th><th style="padding:8px;font-size:11px;color:#64748b">KEY</th><th style="padding:8px;font-size:11px;color:#64748b">REQUEST ID</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
+    <tbody id="notif-tbody">{''.join(rows)}</tbody>
   </table>
+  <script>
+    function rowIdOf(el) {{ return el.id.replace('-arrow', '').replace('-detail', ''); }}
+
+    function toggleNotif(rid) {{
+      var detail = document.getElementById(rid + '-detail');
+      var arrow  = document.getElementById(rid + '-arrow');
+      var open   = detail.style.display === 'table-row';
+      detail.style.display = open ? 'none' : 'table-row';
+      arrow.textContent = open ? '▸' : '▾';
+    }}
+
+    function expandAll() {{
+      document.querySelectorAll('.notif-row').forEach(function(row) {{
+        if (row.style.display === 'none') return;  // skip rows hidden by the current filter
+        var rid = rowIdOf(row.querySelector('[id$="-arrow"]'));
+        document.getElementById(rid + '-detail').style.display = 'table-row';
+        document.getElementById(rid + '-arrow').textContent = '▾';
+      }});
+    }}
+
+    function collapseAll() {{
+      document.querySelectorAll('.notif-detail').forEach(function(d) {{ d.style.display = 'none'; }});
+      document.querySelectorAll('[id$="-arrow"]').forEach(function(a) {{ a.textContent = '▸'; }});
+    }}
+
+    function filterNotifs(which) {{
+      document.querySelectorAll('.filter-btn').forEach(function(btn) {{
+        var active = btn.dataset.filter === which;
+        btn.style.background = active ? '#0f172a' : '#fff';
+      }});
+      document.querySelectorAll('.stat-tile').forEach(function(tile) {{
+        tile.style.borderColor = tile.dataset.filter === which ? '#0f172a' : 'transparent';
+      }});
+      document.querySelectorAll('.notif-row').forEach(function(row) {{
+        var st = row.dataset.status;
+        var show = which === 'all' ||
+                   (which === 'PASS' && st === 'PASS') ||
+                   (which === 'FAIL' && st === 'FAIL') ||
+                   (which === 'other' && st !== 'PASS' && st !== 'FAIL');
+        row.style.display = show ? 'table-row' : 'none';
+        if (!show) {{
+          var rid = rowIdOf(row.querySelector('[id$="-arrow"]'));
+          document.getElementById(rid + '-detail').style.display = 'none';
+          document.getElementById(rid + '-arrow').textContent = '▸';
+        }}
+      }});
+    }}
+  </script>
 </body></html>"""
 
 def save_report(html, prefix="report"):

@@ -39,7 +39,12 @@ def build_allure_results(results, meta, start_ms, stop_ms):
             attachments.append({"name": "payload.json", "source": att, "type": "application/json"})
         res = {
             "uuid": u,
-            "historyId": f"{project}.{key}",
+            # Unique per row, not just per key — otherwise multiple rows that
+            # share the same notification key (common in a single run) get
+            # treated by Allure as retries of the *same* test case and get
+            # collapsed, silently hiding a failed row behind a later passing
+            # one with the same key (or vice versa) instead of showing both.
+            "historyId": f"{project}.{key}.{r.get('db_id', u)}",
             "name": key + (f"  [{r.get('ext_id')}]" if r.get("ext_id") else ""),
             "fullName": f"{flow}.{key}",
             "status": ALLURE_STATUS.get(r.get("status"), "unknown"),

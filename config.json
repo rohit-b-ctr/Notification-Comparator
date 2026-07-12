@@ -1,8 +1,8 @@
 {
   "ssh_host": "172.28.101.13",
   "db_host": "10.189.242.2",
-  "ssh_host_b": "172.29.28.99",
-  "db_host_b": "10.57.117.79",
+  "ssh_host_b": "172.29.32.95",
+  "db_host_b": "10.57.117.116",
   "ssh_port": 22,
   "ssh_user": "rohit_b_ctr_greyorange_com",
   "db_port": 5432,
@@ -36,88 +36,16 @@
   "topic_count": 50,
   "topics": [
     {
-      "label": "Item Create/Update Message",
-      "topic": "item-create.requests"
-    },
-    {
-      "label": "Item Create/Update Response",
-      "topic": "item-create.responses"
-    },
-    {
-      "label": "Inventory Tag Update Request",
-      "topic": "inventory-tag-update.requests"
-    },
-    {
-      "label": "Inventory Tag Update Response",
-      "topic": "inventory-tag-update.responses"
-    },
-    {
-      "label": "Putaway Create/Cancel Request Message",
-      "topic": "service-request.requests"
-    },
-    {
-      "label": "Putaway Create/Cancel Response Message",
-      "topic": "service-request.responses"
-    },
-    {
       "label": "Putaway Complete Notification Message",
       "topic": "service-request-put-notification.events"
-    },
-    {
-      "label": "Putaway Cancel Notification Message",
-      "topic": "service-request-cancel.events"
-    },
-    {
-      "label": "Pick Create/Cancel Request Message",
-      "topic": "service-request.requests"
-    },
-    {
-      "label": "Pick Create/Cancel Response Message",
-      "topic": "service-request.responses"
     },
     {
       "label": "Pick Complete Notification Message",
       "topic": "service-request-pick-notification.events"
     },
     {
-      "label": "Pick Cancel Notification Message",
+      "label": "Cancel Notification Message",
       "topic": "service-request-cancel.events"
-    },
-    {
-      "label": "Audit Create Message",
-      "topic": "audit-create.requests"
-    },
-    {
-      "label": "Audit Create Response",
-      "topic": "audit-create.responses"
-    },
-    {
-      "label": "Audit Notification Message",
-      "topic": "audit-information.events"
-    },
-    {
-      "label": "Inventory Snapshot Request Message",
-      "topic": "inventory-report-create.requests"
-    },
-    {
-      "label": "Inventory Snapshot Response Message",
-      "topic": "inventory-report-create.responses"
-    },
-    {
-      "label": "Inventory Snapshot Confirmation Message",
-      "topic": "report-generation.events"
-    },
-    {
-      "label": "IBO Put Query Request Message",
-      "topic": "inbound-orchestrator-put-query.requests"
-    },
-    {
-      "label": "IBO Response",
-      "topic": "inbound-orchestrator-put-query.responses"
-    },
-    {
-      "label": "ForeCast API",
-      "topic": "inventory.forecast.data"
     }
   ],
   "subscriber_put": 260,
