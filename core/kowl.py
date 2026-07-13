@@ -261,13 +261,23 @@ def load_topic_baseline(key):
     return json.loads(legacy.read_text()) if legacy.exists() else None
 
 def list_topic_baselines():
+    """Return the raw notif keys (topic_baseline_path/load_topic_baseline/
+    save_topic_baseline all take this same raw key and internally re-derive
+    the on-disk label/name subfolder from it via _kowl_label_path).
+
+    This must NOT be the full relative filesystem path (folder/subfolder/key) —
+    that used to be returned here, but feeding a path back into
+    _kowl_label_path() (which expects a raw '__'-joined key, not a path with
+    '/' folder separators) re-derives a bogus, wrong-nested folder and view/
+    delete requests 404 even though the file exists right where it was saved.
+    """
     root = golden_root() / "kowl"
     seen, keys = set(), []
     if root.exists():
         for p in root.rglob("*.json"):
-            rel = str(p.relative_to(root).with_suffix(""))
-            if rel not in seen:
-                seen.add(rel); keys.append(rel)
+            key = p.stem
+            if key not in seen:
+                seen.add(key); keys.append(key)
     for p in TOPIC_DIR.glob("*.json"):  # legacy flat store
         if p.stem not in seen:
             seen.add(p.stem); keys.append(p.stem)

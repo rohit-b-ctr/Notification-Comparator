@@ -28,7 +28,7 @@
     }
   ],
   "poll_interval": 3,
-  "project": "Columbus",
+  "project": "Apotek_Prod",
   "topic_host": "http://192.168.234.12:9003/",
   "topic_host_b": "https://stpbulk-kowl.greymatter.greyorange.com/",
   "topic_prefix": "aph",
