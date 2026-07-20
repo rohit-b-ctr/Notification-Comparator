@@ -17,8 +17,9 @@ A Flask web application that automates WMS notification validation. It captures 
 - **Allure Reports** — every Full Run emits a downloadable `allure-results.zip`; if the Allure CLI is installed, the HTML report is generated in-app automatically
 - **HTML Reports** — lightweight per-run HTML diff reports stored in `reports/`
 - **Dynamic field exclusion** — noisy fields (`id`, `createdOn`, timestamps, etc.) are stripped before diffing to eliminate false positives
-- **Multi-project support** — switch between named project configs (e.g. `Apotek_Prod`) from the Config tab
-- **Secrets never written to disk by default** — DB password and SSH key path are memory-only unless you explicitly save them via the UI
+- **Independent DB and Kowl projects** — the DB/ISD project (`project`) and the Kowl project (`kowl_project`) are separate values, each with their own `golden/{project}/...` folder — so DB and Kowl baselines never collide even when captured under different names
+- **Split config export/import** — download/restore DB-side config (`db_config-*.json`) and Kowl-side config (`kowl_config-*.json`) independently from their respective Config cards, as a portable backup or to move settings to another machine
+- **Encrypted secrets at rest** — DB passwords (baseline + target) are encrypted with `cryptography`'s Fernet and stored directly in `config.json` (as `db_pass_enc` / `db_pass_b_enc`); the encryption key lives in a local-only `.config_key` file that's never committed. SSH key path is just a file path, not a secret, so it's stored in plain text
 
 ---
 
@@ -73,9 +74,9 @@ allure serve allure-results
 
 ## Configuration
 
-### Non-secret settings — `config.json`
+Everything below lives in `config.json`, editable either directly in the file or via the **Config** tab in the UI. `config.json` is **gitignored** — it holds host/IP details plus encrypted DB password blobs, so it should never be committed (see [Secrets](#secrets-in-configjson) below).
 
-These are safe to commit and are editable either directly in the file or via the **Config** tab in the UI.
+### DB / SSH fields
 
 | Key | Description |
 |-----|-------------|
@@ -83,6 +84,7 @@ These are safe to commit and are editable either directly in the file or via the
 | `ssh_host_b` | SSH jump host for the **target** environment (what's compared against the goldens) |
 | `ssh_port` | SSH port — shared by baseline and target (default `22`) |
 | `ssh_user` | SSH username — shared by baseline and target |
+| `ssh_key` | Path to your private key, e.g. `~/.ssh/id_rsa` — shared by baseline and target. Just a file path, not a secret payload, so it's stored in plain text |
 | `db_host` | Postgres host for the **baseline** environment (reachable from `ssh_host`) |
 | `db_host_b` | Postgres host for the **target** environment (reachable from `ssh_host_b`) |
 | `db_port` | Postgres port — shared (default `5432`) |
@@ -91,27 +93,36 @@ These are safe to commit and are editable either directly in the file or via the
 | `db_table` | Notification table (default `subscriber_history`) |
 | `patterns` | List of `{label, pattern}` objects. `pattern` must match a `subscriber.pattern` value in the DB; the app resolves it to `subscriber.id` and queries `db_table` by that ID. Add as many as you need — no fixed PUT/PICK/AUDIT categories |
 | `poll_interval` | Live-watch DB poll interval in seconds |
-| `project` | Active project name (used in report filenames and golden folder) |
+| `project` | DB/ISD project name — golden data saved under `golden/{project}/db/...`, `golden/{project}/isd/...`, `golden/{project}/subscriber/...` |
+| `db_pass_enc` / `db_pass_b_enc` | Encrypted DB passwords (see [Secrets](#secrets-in-configjson)) |
+
+Exportable/importable as one unit from the DB/SSH card's **⬇ Export DB Config** / **⬆ Import DB Config** buttons (`db_config-{project}.json`), including the encrypted password blobs.
+
+Golden snapshots are captured under a **pattern's own label folder**, not by whatever internal `type` field happens to be in the payload — so a pattern like `service-request-cancel-success` that happens to carry `type: PUT` internally still files under its own label, never mixed into a generic `PUT` folder.
+
+### Kowl / Kafka fields
+
+| Key | Description |
+|-----|-------------|
 | `topic_host` | Kowl base URL for the **baseline** environment |
 | `topic_host_b` | Kowl base URL for the **target** environment |
 | `topic_prefix` | Kafka topic prefix for the baseline environment |
 | `topic_prefix_b` | Kafka topic prefix for the target environment |
 | `topic_count` | Number of latest messages to fetch per topic |
 | `topics` | List of `{label, topic}` objects — the topics displayed in the Kafka tab |
+| `kowl_project` | Kowl's own project name — **independent of `project`** above. Kowl golden data is saved under `golden/{kowl_project}/kowl/...`, a completely separate folder from the DB/ISD project |
 
-Golden snapshots are captured under a **pattern's own label folder**, not by whatever internal `type` field happens to be in the payload — so a pattern like `service-request-cancel-success` that happens to carry `type: PUT` internally still files under its own label, never mixed into a generic `PUT` folder.
+Exportable/importable as one unit from the Kowl card's **⬇ Export Kowl Config** / **⬆ Import Kowl Config** buttons (`kowl_config-{kowl_project}.json`).
 
-### Secret settings — entered in the UI each session
+> **Why two separate project names?** DB/ISD captures and Kowl topic captures are often run against different environments at different times. Keeping `project` and `kowl_project` independent means renaming/switching one never silently moves or hides the other's golden data.
 
-These are **never written to `config.json`**. Enter them on the **Config** tab after starting the app:
+### Secrets in `config.json`
 
-| Secret | Description |
-|--------|-------------|
-| DB Password (baseline) | Password for `db_user` on the baseline DB |
-| DB Password (target) | Password for `db_user` on the target DB (falls back to the baseline password if left blank) |
-| SSH Key Path | Absolute path to your private key, e.g. `~/.ssh/rohit_b_ctr_greyorange_com` — shared by both baseline and target |
+DB passwords (baseline + target) are the only true secrets — they're encrypted with `cryptography`'s Fernet cipher and stored directly in `config.json` as `db_pass_enc` / `db_pass_b_enc`. The encryption key lives in a **local-only `.config_key` file** (auto-generated on first use, gitignored, mode `600`) — without it, those blobs are unreadable noise, so `config.json` itself is safe to move around even though it contains them (as long as `.config_key` doesn't travel with it).
 
-The UI offers a **Save secrets** option that writes them to a local `.secrets` file so they survive app restarts. Use this only on a personal machine — never on a shared or CI server.
+Enter DB passwords on the **Config** tab; they're picked up automatically the next time you click **Save** — no separate "save secrets" step. `ssh_key` is not treated as a secret (see above) since it's just a local file path.
+
+There is no more standalone `.secrets` file — an older version of this app used one; if you're upgrading from that version, it's migrated into the encrypted `config.json` fields automatically on first run and then deleted.
 
 ---
 
@@ -131,11 +142,14 @@ The app binds to `0.0.0.0:5050` so it is reachable from other machines on the sa
 
 ### Config Tab
 
-1. Add your notification **patterns** — one per line as `Label = pattern`, where `pattern` matches a `subscriber.pattern` value in the DB (e.g. `PUT_Success = service-request-cancel-success`).
-2. Enter your **DB Password** (baseline, and target if different) and **SSH Key Path**.
-3. Click **Test Baseline** / **Test Target** to verify each SSH tunnel + DB is reachable.
-4. Click **Test Kowl** to verify the Kowl host is reachable.
-5. Adjust any non-secret settings and click **Save**.
+**DB/SSH card:**
+1. Set a **Current project** name (required — golden data is grouped under it) and add your notification **patterns**, one per line as `Label = pattern`, where `pattern` matches a `subscriber.pattern` value in the DB (e.g. `PUT_Success = service-request-cancel-success`).
+2. Enter your **SSH Key** path and **DB Password** (baseline, and target if different) — click the 👁 button to reveal a password field while typing.
+3. Click **💾 Save** — this persists everything (including encrypting and saving the DB passwords) in one action.
+4. Click **🔌 Test Baseline** / **🔌 Test Target** to verify each SSH tunnel + DB is reachable.
+5. Use **⬇ Export DB Config** / **⬆ Import DB Config** to back up or restore this card's settings as a portable file.
+
+**Kowl card:** same flow, but with its own **Kowl Project** field (independent of the DB project above) and **🔌 Test Baseline** / **🔌 Test Target** buttons that check the Kowl host's reachability instead of Postgres.
 
 ### DB Notifications — Capture Golden Baseline
 
@@ -144,9 +158,9 @@ The app binds to `0.0.0.0:5050` so it is reachable from other machines on the sa
 3. Set the **Since** timestamp to just before the flow started (or leave blank for live poll).
 4. Click **Capture**. The app resolves each checked pattern to its `subscriber.id`, fetches matching rows from `subscriber_history` on the **baseline** DB, and saves one `.json` golden per distinct `(type, state, status)` key under `golden/{project}/db/{pattern_label}/`.
 
-For example, capturing pattern `PUT_Success` saves to:
+For example, with project `Columbus`, capturing pattern `PUT_Success` saves to:
 ```
-golden/Apotek_Prod/db/PUT_Success/PUT__created__success.json
+golden/Columbus/db/PUT_Success/PUT__created__success.json
 ```
 
 ### DB Notifications — Compare a New Run
@@ -212,13 +226,14 @@ No DB, no Kafka — just paste two payloads and compare.
 ```
 Comparator/
 ├── app.py                      # Entrypoint — starts Flask on :5050
-├── config.json                 # Non-secret configuration (committed)
+├── config.json                 # Config incl. encrypted secret blobs — gitignored, not committed
+├── .config_key                  # Local-only encryption key for config.json's secrets — gitignored, auto-generated
 ├── requirements.txt            # Python dependencies
 ├── core/
 │   ├── routes.py               # All Flask API endpoints
-│   ├── config.py               # Config load/save + secrets management
+│   ├── config.py               # Config load/save + secret encryption/decryption
 │   ├── db.py                   # SSH tunnel + Postgres queries
-│   ├── golden.py               # Golden snapshot read/write
+│   ├── golden.py               # Golden snapshot read/write (project- and kowl_project-aware)
 │   ├── diffing.py              # DeepDiff wrapper + dynamic field exclusion
 │   ├── live.py                 # Live watch / Full Run logic
 │   ├── kowl.py                 # Kowl WebSocket client (topic capture/compare)
@@ -231,6 +246,8 @@ Comparator/
 │   ├── app.js                  # Frontend logic
 │   └── app.css                 # Styles
 ├── golden/                     # Golden snapshot JSON files (auto-created)
+│   ├── {project}/              #   DB/ISD/subscriber goldens
+│   └── {kowl_project}/kowl/    #   Kowl goldens — independent project namespace
 └── reports/                    # HTML + Allure reports (auto-created)
 ```
 
@@ -272,7 +289,7 @@ To add or remove fields from this list, edit `IGNORED_FIELDS` in `core/diffing.p
 
 ### Golden files not found during Compare
 - Run **Capture** first with a known-good flow before comparing.
-- Check that the `project` setting in Config matches the subdirectory name under `golden/`.
+- Check that the `project` setting in Config matches the subdirectory name under `golden/` for DB/ISD data, or `kowl_project` for Kowl data — these are two independent values, so double-check you're looking at the right one.
 
 ### Allure report not generated in-app
 - Ensure `allure` is on your `PATH`: `allure --version`
@@ -316,6 +333,7 @@ python app.py          # restart
 | `websocket-client` | WebSocket connection to Kowl for topic message streaming |
 | `requests` | Kowl REST API calls (topic list, connection test) |
 | `PyMuPDF` | ISD PDF text extraction |
+| `cryptography` | Encrypts DB passwords at rest in `config.json` |
 | `xmltodict` | XML-to-dict parsing for XML compare |
 
 ---

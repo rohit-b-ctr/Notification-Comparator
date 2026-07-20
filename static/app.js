@@ -57,14 +57,27 @@ function statusBadge(s) {
   return `<span class="badge badge-${map[s]||'info'}">${icon[s]||''} ${s}</span>`;
 }
 
+// MATCH/MISMATCH text+color for the single-verdict JSON/XML compare views.
+// hasWarnings notes a PASS that still has value-only findings (shown separately below).
+function verdictLabel(status, hasWarnings) {
+  if (status === 'PASS') {
+    return hasWarnings
+      ? {text: '✅ MATCH — with value warning(s)', color: '#86efac'}
+      : {text: '✅ MATCH', color: '#86efac'};
+  }
+  return {text: '❌ MISMATCH', color: '#fca5a5'};
+}
+
 // Registry for the "mark value-diffs as pass" feature (client-side, this view only).
 window.__rowReg = window.__rowReg || {};
 window.__rowUid = window.__rowUid || 0;
 
-// A finding is "value-only" when the attribute/path is identical and only the
-// value (or its type) differs — i.e. DeepDiff 'values changed' / 'type changes'.
+// A finding is a "warning" (value-only drift, not a schema break) only when
+// it's a plain value change — same field, same type, different value. A type
+// change (str -> int) is a real schema break and stays a hard difference, not
+// something markable-as-pass — mirrors status_from_findings() on the backend.
 function isValueOnly(f) {
-  return f.type === 'values changed' || f.type === 'type changes';
+  return f.type === 'values changed';
 }
 
 function renderResultRow(r, tbodyId) {
@@ -73,7 +86,12 @@ function renderResultRow(r, tbodyId) {
   const rowId = 'row-' + uid;
   window.__rowReg[uid] = { findings: r.findings || [], status: r.status, marks: new Set(), tbodyId };
 
-  const valueDiffCount = (r.findings || []).filter(isValueOnly).length;
+  // Split findings: real schema breaks (missing/extra field, type change) stay
+  // red "differences"; plain value-only drift renders as a separate yellow
+  // "warnings" section, not counted among the real differences.
+  const indexed = (r.findings || []).map((f, i) => ({f, i}));
+  const failFindings = indexed.filter(x => !isValueOnly(x.f));
+  const warnFindings = indexed.filter(x => isValueOnly(x.f));
 
   const tr = document.createElement('tr');
   tr.className = 'expandable';
@@ -87,28 +105,38 @@ function renderResultRow(r, tbodyId) {
   `;
   tbody.appendChild(tr);
 
-  const markAllBtn = valueDiffCount > 0 ? `
-        <span style="font-weight:400;color:#475569;margin-left:8px">
-          — ${valueDiffCount} value-only
-          <button class="mark-pass-btn" onclick="event.stopPropagation(); markAllValueDiffs(${uid}, true)">✓ mark all pass</button>
-          <button class="mark-pass-btn mark-pass-reset" onclick="event.stopPropagation(); markAllValueDiffs(${uid}, false)">↺ reset</button>
-        </span>` : '';
+  const markAllBtn = warnFindings.length > 0 ? `
+        <button class="mark-pass-btn" onclick="event.stopPropagation(); markAllValueDiffs(${uid}, true)">✓ mark all pass</button>
+        <button class="mark-pass-btn mark-pass-reset" onclick="event.stopPropagation(); markAllValueDiffs(${uid}, false)">↺ reset</button>` : '';
 
-  const diffBlock = r.findings.length > 0 ? `
+  const failBlock = failFindings.length > 0 ? `
         <div id="${rowId}-diffhdr" style="font-size:11px;font-weight:700;color:#64748b;margin:0 0 6px">
-          DIFFERENCES (${r.findings.length})${markAllBtn}
+          DIFFERENCES (${failFindings.length})
         </div>
-        ${r.findings.map((f, i) => `
+        ${failFindings.map(({f, i}) => `
           <div class="diff-row diff-row-fail" id="${rowId}-diff-${i}">
             <span class="diff-type">${f.type}</span>
             <span class="diff-path">${f.path}</span>
             <span class="diff-detail-text">${f.detail}</span>
-            ${isValueOnly(f) ? `<button class="mark-pass-btn" id="${rowId}-mark-${i}" onclick="event.stopPropagation(); toggleMarkPass(${uid}, ${i})">✓ mark pass</button>` : ''}
           </div>`).join('')}` : '';
+
+  const warnBlock = warnFindings.length > 0 ? `
+        <div id="${rowId}-warnhdr" style="font-size:11px;font-weight:700;color:#fbbf24;margin:${failBlock ? '12px' : '0'} 0 6px">
+          WARNINGS (${warnFindings.length}) — value mismatch only${markAllBtn}
+        </div>
+        ${warnFindings.map(({f, i}) => `
+          <div class="diff-row diff-row-warn" id="${rowId}-diff-${i}">
+            <span class="diff-type">${f.type}</span>
+            <span class="diff-path">${f.path}</span>
+            <span class="diff-detail-text">${f.detail}</span>
+            <button class="mark-pass-btn" id="${rowId}-mark-${i}" onclick="event.stopPropagation(); toggleMarkPass(${uid}, ${i})">✓ mark pass</button>
+          </div>`).join('')}` : '';
+
+  const diffBlock = failBlock + warnBlock;
 
   const jsonBlock = r.payload ? `
         <div style="font-size:11px;font-weight:700;color:#64748b;margin:${diffBlock ? '12px' : '0'} 0 6px">
-          PAYLOAD JSON <span style="font-weight:400;color:#475569">— <span style="color:var(--log-pass,#86efac)">green = matches golden</span>, <span style="color:var(--log-fail,#fca5a5)">red = schema mismatch</span></span>
+          PAYLOAD JSON <span style="font-weight:400;color:var(--text-dim)">— <span style="color:var(--log-pass,#86efac)">green = matches golden</span>, <span style="color:#fbbf24">yellow = value-only drift</span>, <span style="color:var(--log-fail,#fca5a5)">red = schema mismatch</span></span>
         </div>
         <pre class="payload-json">${colorJsonLines(r.payload, r.findings)}</pre>` : '';
 
@@ -161,9 +189,12 @@ function markAllValueDiffs(uid, mark) {
 function recomputeRow(uid) {
   const reg = window.__rowReg[uid];
   if (!reg) return;
-  const remaining = reg.findings.length - reg.marks.size;
-  const newStatus = remaining === 0 ? 'PASS' : reg.status;
+  const failCount = reg.findings.filter(f => !isValueOnly(f)).length;
+  const warnCount = reg.findings.filter(isValueOnly).length;
   const marked = reg.marks.size;
+  const warnRemaining = warnCount - marked;
+  const remaining = failCount + warnRemaining;
+  const newStatus = remaining === 0 ? 'PASS' : reg.status;
 
   const statusTd = document.getElementById('row-' + uid + '-status');
   if (statusTd) {
@@ -173,10 +204,12 @@ function recomputeRow(uid) {
   const countTd = document.getElementById('row-' + uid + '-count');
   if (countTd) countTd.textContent = marked > 0 ? `${remaining} (+${marked} accepted)` : `${reg.findings.length}`;
 
-  const hdr = document.getElementById('row-' + uid + '-diffhdr');
-  if (hdr) {
-    const valueDiffCount = reg.findings.filter(isValueOnly).length;
-    hdr.childNodes[0].nodeValue = `DIFFERENCES (${remaining}${marked ? ` active, ${marked} accepted` : ''}) `;
+  // DIFFERENCES header (real schema breaks) never changes via marking — only
+  // value-only warnings are markable. WARNINGS header reflects the mark state.
+  const warnHdr = document.getElementById('row-' + uid + '-warnhdr');
+  if (warnHdr) {
+    warnHdr.childNodes[0].nodeValue =
+      `WARNINGS (${warnRemaining}${marked ? ` active, ${marked} accepted` : ''}) — value mismatch only `;
   }
 
   // For the direct JSON/XML comparators there is a single row + summary strip.
@@ -185,8 +218,9 @@ function recomputeRow(uid) {
   if (prefix) {
     const v = document.getElementById(prefix + '-verdict');
     if (v) {
-      v.textContent = newStatus === 'PASS' ? '✅ MATCH' : '❌ MISMATCH';
-      v.style.color = newStatus === 'PASS' ? '#86efac' : '#fca5a5';
+      const vl = verdictLabel(newStatus, warnRemaining > 0);
+      v.textContent = vl.text;
+      v.style.color = vl.color;
     }
     const d = document.getElementById(prefix + '-diffs');
     if (d) d.textContent = remaining;
@@ -198,58 +232,75 @@ function escapeHtml(s) {
 }
 
 // Convert a DeepDiff path (root['a']['b'][0]) into a dot-path (a.b.0).
+// Splits findings into two path sets so the payload view can tell a real
+// schema break (red) apart from a plain value-only drift (yellow) — mirrors
+// isValueOnly()'s red-vs-yellow split in the findings list below the payload.
 function parseDiffPaths(findings) {
-  const set = new Set();
+  const failSet = new Set(), warnSet = new Set();
   (findings || []).forEach(f => {
     const segs = (f.path || '').match(/\[['"]?([^\]'"]+)['"]?\]/g) || [];
     const path = segs.map(s => s.replace(/^\[['"]?/, '').replace(/['"]?\]$/, '')).join('.');
-    if (path) set.add(path);
+    if (!path) return;
+    (isValueOnly(f) ? warnSet : failSet).add(path);
   });
-  return set;
+  return {failSet, warnSet};
 }
 
-// A line is "bad" only if it IS a changed node or sits INSIDE an added/removed
-// subtree — never just because it's an ancestor on the way to a deep change.
-function pathIsBad(path, diffPaths) {
-  if (!path) return false;
-  if (diffPaths.has(path)) return true;
-  for (const d of diffPaths) if (path.startsWith(d + '.')) return true;
-  return false;
+// A line is "bad"/"warn" only if it IS a changed node or sits INSIDE an
+// added/removed subtree — never just because it's an ancestor on the way to
+// a deep change. Real schema breaks (failSet) take priority over value-only
+// drift (warnSet) if a path somehow lands in both.
+function pathStatus(path, diffPaths) {
+  if (!path) return 'ok';
+  const inSet = (set) => set.has(path) || [...set].some(d => path.startsWith(d + '.'));
+  if (inSet(diffPaths.failSet)) return 'bad';
+  if (inSet(diffPaths.warnSet)) return 'warn';
+  return 'ok';
 }
 
-// Render payload JSON line-by-line: green = matches golden, red = exact mismatch.
+// Render payload JSON line-by-line: green = matches golden, yellow = value-only
+// drift (markable pass), red = real schema mismatch (missing/extra field, type change).
 function colorJsonLines(payload, findings) {
   const diffPaths = parseDiffPaths(findings);
   const lines = [];
   function walk(node, path, indent, keyLabel, comma) {
     const pad = '  '.repeat(indent);
-    const bad = pathIsBad(path, diffPaths);
+    const status = pathStatus(path, diffPaths);
     const prefix = keyLabel !== null ? '"' + keyLabel + '": ' : '';
     if (node !== null && typeof node === 'object') {
       const isArr = Array.isArray(node);
-      lines.push({t: pad + prefix + (isArr ? '[' : '{'), bad});
+      lines.push({t: pad + prefix + (isArr ? '[' : '{'), status});
       const entries = isArr ? node.map((v, i) => [i, v]) : Object.entries(node);
       entries.forEach((kv, i) => {
         const childPath = path ? path + '.' + kv[0] : String(kv[0]);
         walk(kv[1], childPath, indent + 1, isArr ? null : kv[0], i < entries.length - 1);
       });
-      lines.push({t: pad + (isArr ? ']' : '}') + (comma ? ',' : ''), bad});
+      lines.push({t: pad + (isArr ? ']' : '}') + (comma ? ',' : ''), status});
     } else {
-      lines.push({t: pad + prefix + JSON.stringify(node) + (comma ? ',' : ''), bad});
+      lines.push({t: pad + prefix + JSON.stringify(node) + (comma ? ',' : ''), status});
     }
   }
   walk(payload, '', 0, null, false);
+  const cls = {ok: 'jl-ok', warn: 'jl-warn', bad: 'jl-bad'};
   return lines.map(l =>
-    '<span class="' + (l.bad ? 'jl-bad' : 'jl-ok') + '">' + escapeHtml(l.t) + '</span>'
+    '<span class="' + cls[l.status] + '">' + escapeHtml(l.t) + '</span>'
   ).join('\n');
+}
+
+// A row that passed but still has a value-only finding — surfaced separately
+// in summary tiles so a data-drift warning isn't invisible, without failing it.
+function passedWithWarning(r) {
+  return r.status === 'PASS' && (r.findings || []).some(isValueOnly);
 }
 
 function updateWatchCounters(results) {
   const pass = results.filter(r=>r.status==='PASS').length;
+  const warn = results.filter(passedWithWarning).length;
   const fail = results.filter(r=>r.status==='FAIL').length;
   const nog  = results.filter(r=>r.status==='NO GOLDEN').length;
   document.getElementById('w-total').textContent = results.length;
   document.getElementById('w-pass').textContent  = pass;
+  document.getElementById('w-warning').textContent = warn;
   document.getElementById('w-fail').textContent  = fail;
   document.getElementById('w-nogolden').textContent = nog;
   document.getElementById('watch-summary').style.display = 'block';
@@ -260,18 +311,11 @@ function updateWatchCounters(results) {
 let fullRunResults = [];
 let fullRunSSE = null;
 let fullRunGolden = 'db';
-let fullRunIsdData = 'db';
 
 function setFullRunGolden(src) {
   fullRunGolden = src;
-  ['db','isd','kowl'].forEach(s =>
+  ['db','kowl'].forEach(s =>
     document.getElementById('fullrun-gs-' + s).classList.toggle('active', s === src));
-  document.getElementById('fullrun-isd-data').style.display = src === 'isd' ? 'flex' : 'none';
-}
-function setFullRunIsdData(src) {
-  fullRunIsdData = src;
-  document.getElementById('fullrun-isd-db').classList.toggle('active', src === 'db');
-  document.getElementById('fullrun-isd-kowl').classList.toggle('active', src === 'kowl');
 }
 
 // Generic CSS-donut painter
@@ -286,10 +330,12 @@ function paintDonut(donutId, pctId, pass, fail, other) {
 
 function updateFullRunCounters(results) {
   const pass = results.filter(r=>r.status==='PASS').length;
+  const warn = results.filter(passedWithWarning).length;
   const fail = results.filter(r=>r.status==='FAIL').length;
-  const nog  = results.filter(r=>r.status!=='PASS'&&r.status!=='FAIL').length;
+  const nog  = results.filter(r=>!['PASS','FAIL'].includes(r.status)).length;
   document.getElementById('fr-total').textContent = results.length;
   document.getElementById('fr-pass').textContent  = pass;
+  document.getElementById('fr-warning').textContent = warn;
   document.getElementById('fr-fail').textContent  = fail;
   document.getElementById('fr-nogolden').textContent = nog;
   document.getElementById('fr-leg-pass').textContent = pass;
@@ -307,8 +353,7 @@ async function startFullRun() {
   try {
     const res = await fetch('/api/full-run/start', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ interval, mode: modeState.fullrun, golden_source: fullRunGolden,
-                             data_source: fullRunGolden === 'isd' ? fullRunIsdData : undefined })
+      body: JSON.stringify({ interval, mode: modeState.fullrun, golden_source: fullRunGolden })
     });
     data = await res.json();
   } catch (e) { alert('Full Run failed to start: ' + e); return; }
@@ -553,7 +598,7 @@ function switchCapTab(tab) {
 }
 
 function switchCapSource(src) {
-  ['db','kowl','isd'].forEach(s => {
+  ['db','kowl','isd','subscriber'].forEach(s => {
     document.getElementById('cap-src-' + s).style.display = s === src ? 'block' : 'none';
     document.getElementById('cap-src-tab-' + s).classList.toggle('active', s === src);
   });
@@ -564,7 +609,108 @@ function switchCapSource(src) {
       const p = document.getElementById('cap-project-label').textContent;
       lbl.textContent = p;
     });
+  } else if (src === 'subscriber') {
+    const lbl = document.getElementById('cap-subscriber-project');
+    if (lbl) refreshCaptureProject().then(() => {
+      lbl.textContent = document.getElementById('cap-project-label').textContent;
+    });
   }
+}
+
+// ── Subscriber snapshot (Capture + Compare) ────────────────────────────────
+async function doCaptureSubscriber() {
+  const btn = document.getElementById('cap-subscriber-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  try {
+    const res = await fetch('/api/subscriber/capture', {method: 'POST'});
+    const data = await res.json();
+    const el   = document.getElementById('cap-subscriber-result');
+    const body = document.getElementById('cap-subscriber-result-body');
+    el.style.display = 'block';
+    if (data.ok) {
+      const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
+      body.innerHTML = `
+        ${errs}
+        <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} subscriber snapshot(s).</p>
+        ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
+      `;
+    } else {
+      body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</p>`;
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.innerHTML = '📸 Capture Subscriber Snapshot';
+}
+
+async function doCompareSubscriber() {
+  const btn = document.getElementById('cmp-subscriber-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  try {
+    const res = await fetch('/api/subscriber/compare', {method: 'POST'});
+    const data = await res.json();
+    const el   = document.getElementById('cmp-subscriber-result');
+    const body = document.getElementById('cmp-subscriber-result-body');
+    const reportBar = document.getElementById('cmp-subscriber-report-bar');
+    el.style.display = 'block';
+    if (data.ok) {
+      body.innerHTML = data.results.map((r, i) => {
+        const color = r.status === 'PASS' ? 'var(--log-pass,#86efac)'
+                    : r.status === 'FAIL' ? 'var(--log-fail,#fca5a5)' : '#fbbf24';
+        const findings = r.findings || [];
+        const fields = r.fields || [];
+        // Side-by-side field table: baseline (left) vs target (right), every
+        // field shown — 'same' fields in the default color, 'warn' (expected
+        // drift: env/time/ip/ids — doesn't fail) in yellow, 'fail' (schema
+        // break) in red.
+        const FIELD_COLOR = {same: 'var(--text-muted)', warn: '#fbbf24', fail: 'var(--log-fail,#fca5a5)'};
+        let detail;
+        if (fields.length) {
+          detail = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
+              <th style="padding:3px 8px">FIELD</th><th style="padding:3px 8px">BASELINE</th><th style="padding:3px 8px">TARGET</th>
+            </tr></thead>
+            <tbody>${fields.map(f => `<tr>
+              <td style="padding:3px 8px;font-family:monospace;font-size:11px;color:var(--text-dim)">${escapeHtml(f.path)}</td>
+              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]}">${escapeHtml(String(f.baseline))}</td>
+              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]}">${escapeHtml(String(f.target))}</td>
+            </tr>`).join('')}</tbody>
+          </table>`;
+        } else {
+          detail = findings.map(f => {
+            const isWarn = f.type === 'values changed';
+            return `<div style="font-size:12px;color:${isWarn ? '#fbbf24' : 'var(--log-fail,#fca5a5)'};padding:2px 0">
+              <b>${escapeHtml(f.type)}</b> <code>${escapeHtml(f.path)}</code> — ${escapeHtml(f.detail)}</div>`;
+          }).join('') || '<div style="font-size:12px;color:var(--log-pass,#86efac)">✓ matches golden</div>';
+        }
+        const rid = `sub-diff-${i}`;
+        return `<tr style="cursor:pointer" onclick="document.getElementById('${rid}').classList.toggle('hidden');
+                 this.querySelector('.sub-arrow').textContent = document.getElementById('${rid}').classList.contains('hidden') ? '▸' : '▾'">
+          <td><span class="sub-arrow">▸</span> ${escapeHtml(r.label)}</td>
+          <td><code>${escapeHtml(r.pattern)}</code></td>
+          <td style="color:${color}">${r.status}</td>
+          <td>${findings.length} finding(s)</td>
+        </tr>
+        <tr id="${rid}" class="hidden"><td></td><td colspan="3">${detail}</td></tr>`;
+      }).join('');
+      if (reportBar) {
+        reportBar.style.display = data.report ? 'flex' : 'none';
+        reportBar.innerHTML = data.report ? `
+          <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}" target="_blank">📄 View Report</a>
+          <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}?download=1">⬇ Download Report</a>` : '';
+      }
+    } else {
+      body.innerHTML = `<tr><td colspan="4" style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</td></tr>`;
+      if (reportBar) reportBar.style.display = 'none';
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.innerHTML = '🔍 Compare Subscribers';
 }
 
 function renderPatternChecks(containerId, patterns) {
@@ -588,10 +734,22 @@ async function refreshCaptureProject() {
     const cfg = await (await fetch('/api/config')).json();
     const p = cfg.project || '(none)';
     document.getElementById('cap-project-label').textContent = p;
-    document.getElementById('cap-isd-project').textContent   = p;
+    const dbNameEl = document.getElementById('isd-target-db-name');
+    const kowlNameEl = document.getElementById('isd-target-kowl-name');
+    if (dbNameEl) dbNameEl.textContent = cfg.project || 'none';
+    if (kowlNameEl) kowlNameEl.textContent = cfg.kowl_project || 'none';
     renderPatternChecks('cap-pattern-checks', cfg.patterns || []);
     renderPatternChecks('cap-live-pattern-checks', cfg.patterns || []);
   } catch (e) {}
+}
+
+// Which project ISD-captured goldens are filed under — 'db' (default) or 'kowl'.
+// One global picker (above both ISD capture methods: PDF upload + paste).
+let isdTargetProject = 'db';
+function setIsdTargetProject(kind) {
+  isdTargetProject = kind;
+  document.getElementById('isd-target-db').classList.toggle('active', kind === 'db');
+  document.getElementById('isd-target-kowl').classList.toggle('active', kind === 'kowl');
 }
 
 async function uploadISD() {
@@ -600,6 +758,7 @@ async function uploadISD() {
   if (!fileEl.files.length) { alert('Choose an ISD PDF first.'); return; }
   const fd = new FormData();
   fd.append('file', fileEl.files[0]);
+  fd.append('project_kind', isdTargetProject);
   btn.disabled = true; btn.textContent = '⏳ Reading ISD...';
   try {
     const res = await fetch('/api/golden/from-isd', {method:'POST', body: fd});
@@ -611,17 +770,41 @@ async function uploadISD() {
       body.innerHTML = '<div style="color:var(--log-fail,#fca5a5)">❌ ' + data.error + '</div>';
     } else {
       const unparse = data.blocks_unparseable || 0;
-      body.innerHTML =
+      window.__isdFailedBlocks = data.failed_blocks || [];
+      const failedList = window.__isdFailedBlocks.length
+        ? `<div style="margin-top:8px">` +
+          window.__isdFailedBlocks.map((fb, idx) => `
+            <div class="golden-item" style="align-items:flex-start">
+              <span class="golden-name" style="font-family:monospace;font-size:11px;color:#fcd34d">
+                Page ${fb.page}: ${escapeHtml(fb.preview)}${fb.preview.length >= 100 ? '…' : ''}
+              </span>
+              <button class="btn-xs btn-xs-view" onclick="loadFailedIsdBlock(${idx})">📋 Load into paste box</button>
+            </div>`).join('') +
+          `</div>`
+        : '';
+      const scopeNote = data.scoped
+        ? `<div style="font-size:11px;color:var(--log-pass,#86efac);margin-bottom:6px">🎯 Scoped to your configured patterns/topics — unrelated payloads elsewhere in the doc were skipped.</div>`
+        : `<div style="font-size:11px;color:#fcd34d;margin-bottom:6px">⚠️ No configured pattern/topic name matched a "Kafka Topic" heading in this doc — fell back to scanning the whole document for any JSON block (may include unrelated payloads).</div>`;
+      body.innerHTML = scopeNote +
         `<div style="font-size:12px;color:var(--log-pass,#86efac);margin-bottom:6px">✅ Read ${data.pages} page(s); saved ${data.keys} golden(s) under project "${data.project || '(none)'}".</div>` +
         `<div style="font-size:11px;color:#64748b;margin-bottom:10px">JSON blocks found: ${data.blocks_seen} · parsed: ${data.blocks_parsed}${unparse ? ` · <span style="color:#fcd34d">unparseable: ${unparse}</span>` : ''}</div>` +
         (data.saved.length
           ? data.saved.map(s => `<div class="golden-item"><span class="golden-name">${s.key}</span></div>`).join('')
           : '<div style="color:#fcd34d;font-size:12px">No payloads auto-extracted.</div>') +
-        (unparse ? `<div style="font-size:11px;color:#fcd34d;margin-top:8px">⚠️ ${unparse} payload block(s) couldn't be parsed (the PDF's JSON is malformed — smart quotes / wrapped tokens). Paste those below to capture them.</div>` : '');
+        (unparse ? `<div style="font-size:11px;color:#fcd34d;margin-top:8px">⚠️ ${unparse} payload block(s) couldn't be parsed (the PDF's JSON is malformed — smart quotes / wrapped tokens). Found on the page(s) below — click to load the raw text into the paste box, fix it, then save it there.</div>${failedList}` : '');
       loadGoldens();
     }
   } catch (e) { alert('ISD upload error: ' + e); }
   btn.disabled = false; btn.textContent = '📄 Read ISD & Capture Golden';
+}
+
+function loadFailedIsdBlock(idx) {
+  const fb = (window.__isdFailedBlocks || [])[idx];
+  if (!fb) return;
+  const box = document.getElementById('isd-paste');
+  box.value = fb.raw;
+  box.scrollIntoView({behavior: 'smooth', block: 'center'});
+  box.focus();
 }
 
 async function saveIsdPaste() {
@@ -632,7 +815,8 @@ async function saveIsdPaste() {
   btn.disabled = true; btn.textContent = '⏳ Saving...'; status.textContent = '';
   try {
     const res = await fetch('/api/golden/from-json', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, project_kind: isdTargetProject})
     });
     const data = await res.json();
     const result = document.getElementById('isd-paste-result');
@@ -786,16 +970,14 @@ async function stopLiveCapture() {
 
 // ── Compare ───────────────────────────────────────────────────────────────────
 let cmpFetchMode = 'time';  // 'time' or 'extid'
-let cmpGoldenSource = 'db'; // 'db' | 'isd' | 'kowl'
+let cmpGoldenSource = 'db'; // 'db' | 'kowl'
 
-let isdDataSource = 'db';   // when golden=isd: validate DB-data or Kowl-data
 let topicGoldenSource = 'kowl';  // what golden the kowl panel compares against
 
-// Pick comparison mode: db/isd golden, kowl golden, or standalone direct-JSON
+// Pick comparison mode: db golden, kowl golden, or standalone direct-JSON
 function setCompareGolden(src) {
-  ['db','isd','kowl','json','xml'].forEach(s =>
+  ['db','kowl','json','xml','subscriber'].forEach(s =>
     document.getElementById('cmp-gs-' + s).classList.toggle('active', s === src));
-  document.getElementById('cmp-isd-data').style.display = src === 'isd' ? 'flex' : 'none';
   if (src === 'kowl') {
     cmpGoldenSource = 'kowl'; topicGoldenSource = 'kowl';
     showComparePanel('kowl');
@@ -803,36 +985,23 @@ function setCompareGolden(src) {
     showComparePanel('json');
   } else if (src === 'xml') {
     showComparePanel('xml');
+  } else if (src === 'subscriber') {
+    showComparePanel('subscriber');
   } else if (src === 'db') {
     cmpGoldenSource = 'db'; showComparePanel('notif');
-  } else if (src === 'isd') {
-    cmpGoldenSource = 'isd';                 // golden source = isd
-    setIsdDataSource(isdDataSource);         // data origin DB or Kowl
-  }
-}
-
-// For ISD golden: choose whether live data comes from DB or Kowl
-function setIsdDataSource(src) {
-  isdDataSource = src;
-  document.getElementById('cmp-isd-db').classList.toggle('active', src === 'db');
-  document.getElementById('cmp-isd-kowl').classList.toggle('active', src === 'kowl');
-  if (src === 'kowl') {
-    topicGoldenSource = 'isd';               // kowl panel compares against ISD golden
-    showComparePanel('kowl');
-    initTopics();
-  } else {
-    showComparePanel('notif');               // DB-fetched notifications vs ISD golden
   }
 }
 
 // Toggle which compare panel is visible
 function showComparePanel(which) {
   const isKowl = which === 'kowl', isJson = which === 'json', isXml = which === 'xml';
-  const isDirect = isKowl || isJson || isXml;
+  const isSubscriber = which === 'subscriber';
+  const isDirect = isKowl || isJson || isXml || isSubscriber;
   document.getElementById('cmp-tabs-row').style.display = isDirect ? 'none' : 'flex';
   document.getElementById('cmp-src-kowl').style.display = isKowl ? 'block' : 'none';
   document.getElementById('cmp-src-json').style.display = isJson ? 'block' : 'none';
   document.getElementById('cmp-src-xml').style.display  = isXml  ? 'block' : 'none';
+  document.getElementById('cmp-src-subscriber').style.display = isSubscriber ? 'block' : 'none';
   document.getElementById('cmp-src-notif').style.display = isDirect ? 'none' : 'block';
   if (which === 'notif') switchCmpTab(cmpFetchMode === 'extid' ? 'extid' : 'time');
   if (isKowl) initTopics();
@@ -1016,8 +1185,9 @@ async function doJsonCompare() {
 function renderJsonCompare(data) {
   document.getElementById('json-summary').style.display = 'flex';
   const v = document.getElementById('json-verdict');
-  v.textContent = data.status === 'PASS' ? '✅ MATCH' : '❌ MISMATCH';
-  v.style.color = data.status === 'PASS' ? '#86efac' : '#fca5a5';
+  const vl = verdictLabel(data.status, (data.findings || []).some(isValueOnly));
+  v.textContent = vl.text;
+  v.style.color = vl.color;
   document.getElementById('json-diffs').textContent = data.count;
   document.getElementById('json-result-card').style.display = 'block';
   const body = document.getElementById('json-result-body');
@@ -1071,8 +1241,9 @@ async function doXmlCompare() {
 function renderXmlCompare(data) {
   document.getElementById('xml-summary').style.display = 'flex';
   const v = document.getElementById('xml-verdict');
-  v.textContent = data.status === 'PASS' ? '✅ MATCH' : '❌ MISMATCH';
-  v.style.color = data.status === 'PASS' ? '#86efac' : '#fca5a5';
+  const vl = verdictLabel(data.status, (data.findings || []).some(isValueOnly));
+  v.textContent = vl.text;
+  v.style.color = vl.color;
   document.getElementById('xml-diffs').textContent = data.count;
   document.getElementById('xml-result-card').style.display = 'block';
   const body = document.getElementById('xml-result-body');
@@ -1084,17 +1255,48 @@ function renderXmlCompare(data) {
   }, 'xml-result-body');
 }
 
+// Multi-pattern chip picker for Compare — lets the user queue up several
+// patterns and run them together in one compare instead of one at a time.
+let cmpPatterns = [];
+
+function addCmpPattern() {
+  const input = document.getElementById('cmp-pattern');
+  const val = input.value.trim();
+  if (val && !cmpPatterns.includes(val)) {
+    cmpPatterns.push(val);
+    renderCmpPatternChips();
+  }
+  input.value = '';
+  input.focus();
+}
+
+function removeCmpPattern(p) {
+  cmpPatterns = cmpPatterns.filter(x => x !== p);
+  renderCmpPatternChips();
+}
+
+function renderCmpPatternChips() {
+  const box = document.getElementById('cmp-pattern-chips');
+  if (!box) return;
+  box.innerHTML = cmpPatterns.map(p => `
+    <span class="flow-pill active pill-other" style="cursor:default">
+      ${p}<span style="cursor:pointer;margin-left:6px" onclick="removeCmpPattern('${p.replace(/'/g, "\\'")}')">✕</span>
+    </span>`).join('');
+}
+
 async function doCompare() {
   const btn = document.getElementById('cmp-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Comparing...';
 
-  const pattern = document.getElementById('cmp-pattern').value.trim();
+  const typed = document.getElementById('cmp-pattern').value.trim();
+  if (typed && !cmpPatterns.includes(typed)) { cmpPatterns.push(typed); renderCmpPatternChips(); }
+  const patterns = cmpPatterns.slice();
   const since  = cmpFetchMode === 'time'  ? datetimeLocalToISO(document.getElementById('cmp-since').value) : null;
   const ext_id = cmpFetchMode === 'extid' ? document.getElementById('cmp-extid').value.trim() : null;
 
-  if (!pattern) {
-    alert('Please enter a pattern.');
+  if (patterns.length === 0) {
+    alert('Please add at least one pattern.');
     btn.disabled = false;
     btn.innerHTML = '🔍 Compare';
     return;
@@ -1116,7 +1318,7 @@ async function doCompare() {
     const res = await fetch('/api/compare', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({pattern, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
+      body: JSON.stringify({patterns, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
     });
     const data = await res.json();
 
@@ -1132,6 +1334,19 @@ async function doCompare() {
     document.getElementById('cmp-nogolden').textContent = nog;
     document.getElementById('cmp-summary').style.display = 'block';
     document.getElementById('cmp-results-card').style.display = 'block';
+
+    const notes = [];
+    if (data.skipped_repeats > 0)
+      notes.push(`${data.skipped_repeats} additional notification(s) with an already-seen key were skipped`);
+    if (data.missing_patterns && data.missing_patterns.length)
+      notes.push(`no subscriber found for: ${data.missing_patterns.join(', ')}`);
+    const skippedNote = document.getElementById('cmp-skipped-note');
+    if (notes.length) {
+      skippedNote.textContent = 'ℹ️ ' + notes.join(' — ');
+      skippedNote.style.display = 'block';
+    } else {
+      skippedNote.style.display = 'none';
+    }
 
     const tbody = document.getElementById('cmp-results-body');
     tbody.innerHTML = '';
@@ -1153,11 +1368,8 @@ let watchResults = [];
 let watchSSE = null;
 
 let watchGolden = 'db';
-let watchIsdData = 'db';
 function watchDataOrigin() {
-  if (watchGolden === 'kowl') return 'kowl';
-  if (watchGolden === 'isd' && watchIsdData === 'kowl') return 'kowl';
-  return 'db';
+  return watchGolden === 'kowl' ? 'kowl' : 'db';
 }
 // Kowl watching is topic-based — hide DB-only Flow/Subscriber/fetch controls.
 function updateWatchControls() {
@@ -1174,15 +1386,8 @@ function updateWatchControls() {
 }
 function setWatchGolden(src) {
   watchGolden = src;
-  ['db','isd','kowl'].forEach(s =>
+  ['db','kowl'].forEach(s =>
     document.getElementById('watch-gs-' + s).classList.toggle('active', s === src));
-  document.getElementById('watch-isd-data').style.display = src === 'isd' ? 'flex' : 'none';
-  updateWatchControls();
-}
-function setWatchIsdData(src) {
-  watchIsdData = src;
-  document.getElementById('watch-isd-db').classList.toggle('active', src === 'db');
-  document.getElementById('watch-isd-kowl').classList.toggle('active', src === 'kowl');
   updateWatchControls();
 }
 
@@ -1196,7 +1401,6 @@ async function startWatch() {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         pattern, interval, mode: modeState.watch, golden_source: watchGolden,
-        data_source: watchGolden === 'isd' ? watchIsdData : undefined,
         ext_id: watchFetchMode === 'extid' ? document.getElementById('watch-extid').value.trim() : null
       })
     });
@@ -1353,16 +1557,14 @@ async function loadConfig() {
   // non-secret fields from disk
   document.getElementById('cfg-ssh-host').value  = cfg.ssh_host  || '';
   document.getElementById('cfg-ssh-host-b').value = cfg.ssh_host_b || '';
-  document.getElementById('cfg-ssh-port').value  = cfg.ssh_port  || 22;
   document.getElementById('cfg-ssh-user').value  = cfg.ssh_user  || '';
   document.getElementById('cfg-db-host').value   = cfg.db_host   || '';
   document.getElementById('cfg-db-host-b').value = cfg.db_host_b || '';
-  document.getElementById('cfg-db-port').value   = cfg.db_port   || 5432;
   document.getElementById('cfg-db-name').value   = cfg.db_name   || '';
   document.getElementById('cfg-db-table').value  = cfg.db_table  || '';
-  document.getElementById('cfg-db-user').value   = cfg.db_user   || '';
   document.getElementById('cfg-poll').value      = cfg.poll_interval || 3;
   document.getElementById('cfg-project').value   = cfg.project || '';
+  document.getElementById('cfg-project-kowl').value = cfg.kowl_project || '';
   // project autocomplete from existing golden project folders
   try {
     const pj = await (await fetch('/api/projects')).json();
@@ -1390,22 +1592,82 @@ async function loadConfig() {
   document.getElementById('cfg-patterns').value =
     (cfg.patterns || []).map(p => `${p.label} = ${p.pattern}`).join('\n');
   refreshPatternsDatalist(cfg.patterns || []);
-  // secrets — never pre-filled, always blank on load
-  document.getElementById('cfg-ssh-key').value  = '';
-  document.getElementById('cfg-db-pass').value  = '';
-  document.getElementById('cfg-db-pass-b').value = '';
+  // ssh_key is just a file path, not a secret — prefilled like any other field
+  document.getElementById('cfg-ssh-key').value  = cfg.ssh_key || '';
+  // DB passwords now prefill too, so they don't vanish on Save/refresh
+  document.getElementById('cfg-db-pass').value  = cfg.db_pass || '';
+  document.getElementById('cfg-db-pass-b').value = cfg.db_pass_b || '';
   // show banner if secrets not yet set
   document.getElementById('cfg-secrets-banner').style.display = cfg.secrets_ready ? 'none' : 'block';
   // check if secrets were auto-loaded from .secrets file
   checkSavedSecretsStatus();
 }
 
-function toggleVisible(inputId, btnId) {
-  const inp  = document.getElementById(inputId);
-  const btn  = typeof btnId === 'string' ? document.getElementById(btnId) : btnId;
-  const show = inp.type === 'password';
-  inp.type = show ? 'text' : 'password';
-  btn.textContent = show ? '🙈 Hide' : '👁 Show';
+// Generic export/import used by both the DB config and Kowl config buttons —
+// each just points at its own pair of endpoints, filename, and status/file-input ids.
+async function _exportConfigSubset(endpoint, filePrefix, statusId) {
+  const status = document.getElementById(statusId);
+  try {
+    const cfg = await (await fetch(endpoint)).json();
+    const blob = new Blob([JSON.stringify(cfg, null, 2)], {type: 'application/json'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    const stamp = (cfg.project || 'comparator').replace(/[^a-z0-9_-]+/gi, '_');
+    a.href = url;
+    a.download = `${filePrefix}-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    status.textContent = '✅ Exported';
+    status.style.color = '#86efac';
+  } catch (e) {
+    status.textContent = '❌ ' + e.message;
+    status.style.color = '#fca5a5';
+  }
+  setTimeout(() => status.textContent = '', 3000);
+}
+
+async function _importConfigSubset(event, endpoint, statusId, confirmMsg) {
+  const file   = event.target.files[0];
+  const status = document.getElementById(statusId);
+  event.target.value = '';  // allow re-selecting the same file later
+  if (!file) return;
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const res = await fetch(endpoint, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(parsed)
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Import failed');
+    status.textContent = '✅ Imported — reloading settings...';
+    status.style.color = '#86efac';
+    await loadConfig();
+    status.textContent = '✅ Imported';
+  } catch (e) {
+    status.textContent = '❌ ' + e.message;
+    status.style.color = '#fca5a5';
+  }
+  setTimeout(() => status.textContent = '', 4000);
+}
+
+function exportDbConfig() {
+  return _exportConfigSubset('/api/config/export/db', 'db_config', 'cfg-db-import-status');
+}
+function importDbConfig(event) {
+  return _importConfigSubset(event, '/api/config/import/db', 'cfg-db-import-status',
+    `Import "${event.target.files[0]?.name}"? This replaces the current DB/SSH, patterns, and project settings (Kowl settings and secrets are untouched).`);
+}
+function exportKowlConfig() {
+  return _exportConfigSubset('/api/config/export/kowl', 'kowl_config', 'cfg-kowl-import-status');
+}
+function importKowlConfig(event) {
+  return _importConfigSubset(event, '/api/config/import/kowl', 'cfg-kowl-import-status',
+    `Import "${event.target.files[0]?.name}"? This replaces the current Kowl/Kafka topic settings (DB/SSH settings are untouched).`);
 }
 
 async function checkSavedSecretsStatus() {
@@ -1415,41 +1677,34 @@ async function checkSavedSecretsStatus() {
   if (banner) banner.style.display = data.saved ? 'flex' : 'none';
 }
 
-async function saveSecrets() {
-  const btn       = document.getElementById('cfg-secrets-btn');
-  const status    = document.getElementById('cfg-secrets-status');
-  const ssh_key   = document.getElementById('cfg-ssh-key').value.trim();
+// Fire-and-forget: pushes whatever's in the DB password fields to the
+// in-memory secret store, always persisted (encrypted) into config.json.
+// Called from saveConfig() so there's a single Save action instead of a
+// separate secrets step — failures here are silent and never block the main
+// config save. (ssh_key isn't a secret — it's just part of the main payload.)
+async function pushSecretsIfPresent() {
   const db_pass   = document.getElementById('cfg-db-pass').value;
   const db_pass_b = document.getElementById('cfg-db-pass-b').value;
-  const saveDisk  = document.getElementById('cfg-save-disk').checked;
+  if (!db_pass && !db_pass_b) return;
+  try {
+    const res = await fetch('/api/secrets', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({db_pass, db_pass_b, save_to_disk: true})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('cfg-secrets-banner').style.display = 'none';
+      checkSavedSecretsStatus();
+    }
+  } catch (e) {}
+}
 
-  if (!ssh_key && !db_pass && !db_pass_b) {
-    status.textContent = '❌ Enter a password and/or SSH key';
-    status.style.color = '#fca5a5';
-    return;
-  }
-  btn.disabled = true;
-  const res  = await fetch('/api/secrets', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ssh_key, db_pass, db_pass_b, save_to_disk: saveDisk})
-  });
-  const data = await res.json();
-  if (data.ok) {
-    const msg = saveDisk ? '✅ Secrets set & saved to disk' : '✅ Secrets set for this session';
-    status.textContent = msg;
-    status.style.color = '#86efac';
-    document.getElementById('cfg-secrets-banner').style.display = 'none';
-    document.getElementById('cfg-ssh-key').value  = '';
-    document.getElementById('cfg-db-pass').value  = '';
-    document.getElementById('cfg-db-pass-b').value = '';
-    document.getElementById('cfg-save-disk').checked = false;
-    checkSavedSecretsStatus();
-  } else {
-    status.textContent = '❌ Failed';
-    status.style.color = '#fca5a5';
-  }
-  btn.disabled = false;
-  setTimeout(() => status.textContent = '', 4000);
+function toggleVisible(inputId, btnId) {
+  const inp  = document.getElementById(inputId);
+  const btn  = document.getElementById(btnId);
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.textContent = show ? '🙈 Hide' : '👁 Show';
 }
 
 async function clearSavedSecrets() {
@@ -1463,8 +1718,22 @@ async function saveConfig(silent = false) {
   const btn    = document.getElementById('cfg-save-btn');
   const status = document.getElementById('cfg-status');
   const errEl  = document.getElementById('cfg-pattern-error');
+  const projectInput = document.getElementById('cfg-project');
 
   const patterns = parsePatternsTextarea(document.getElementById('cfg-patterns').value);
+
+  // Project is required — golden data is grouped under this name
+  if (!projectInput.value.trim()) {
+    projectInput.focus();
+    projectInput.style.borderColor = '#f43f5e';
+    projectInput.style.boxShadow   = '0 0 0 3px rgba(244,63,94,.2)';
+    if (!silent) {
+      status.textContent = '❌ Project name is required';
+      status.style.color = '#fca5a5';
+    }
+    setTimeout(() => { projectInput.style.borderColor = ''; projectInput.style.boxShadow = ''; }, 2500);
+    return false;
+  }
 
   // At least one pattern required
   if (!patterns.length) {
@@ -1481,14 +1750,12 @@ async function saveConfig(silent = false) {
   const payload = {
     ssh_host:          document.getElementById('cfg-ssh-host').value,
     ssh_host_b:        document.getElementById('cfg-ssh-host-b').value,
-    ssh_port:          document.getElementById('cfg-ssh-port').value,
     ssh_user:          document.getElementById('cfg-ssh-user').value,
+    ssh_key:           document.getElementById('cfg-ssh-key').value.trim(),
     db_host:           document.getElementById('cfg-db-host').value,
     db_host_b:         document.getElementById('cfg-db-host-b').value,
-    db_port:           document.getElementById('cfg-db-port').value,
     db_name:           document.getElementById('cfg-db-name').value,
     db_table:          document.getElementById('cfg-db-table').value,
-    db_user:           document.getElementById('cfg-db-user').value,
     patterns:          patterns,
     poll_interval:     document.getElementById('cfg-poll').value,
     project:           document.getElementById('cfg-project').value.trim(),
@@ -1504,12 +1771,15 @@ async function saveConfig(silent = false) {
     body: JSON.stringify(payload)
   });
   const data = await res.json();
-  btn.disabled = false;
+  await pushSecretsIfPresent();
   if (!silent) {
-    status.textContent = data.ok ? '✅ Saved!' : '❌ ' + data.error;
-    status.style.color = data.ok ? '#86efac' : '#fca5a5';
-    setTimeout(() => status.textContent = '', 3000);
+    const originalLabel = btn.textContent;
+    btn.textContent = data.ok ? '✓ Saved' : '❌ Failed';
+    status.textContent = data.ok ? '' : '❌ ' + data.error;
+    status.style.color = '#fca5a5';
+    setTimeout(() => { btn.textContent = originalLabel; status.textContent = ''; }, 2000);
   }
+  btn.disabled = false;
   if (data.ok) {
     refreshPatternsDatalist(patterns);
     document.getElementById('watch-interval').value = payload.poll_interval;
@@ -1520,60 +1790,48 @@ async function saveConfig(silent = false) {
 async function testConnection(target = false) {
   const btn    = document.getElementById(target ? 'cfg-test-btn-b' : 'cfg-test-btn');
   const status = document.getElementById('cfg-status');
+  const originalLabel = btn.textContent;
   // Save first (with validation) — if save fails, abort
   const saved = await saveConfig(true);
   if (!saved) return;
   btn.disabled = true;
-  status.textContent = '🔄 Testing...';
-  status.style.color = '#93c5fd';
+  btn.textContent = '🔄 Testing...';
+  status.textContent = '';
   const res  = await fetch('/api/config/test', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({target})
   });
   const data = await res.json();
+  btn.textContent = data.ok ? '✓ OK' : '❌ Failed';
   status.textContent = data.msg;
   status.style.color = data.ok ? '#86efac' : '#fca5a5';
-  btn.disabled = false;
-}
-
-async function saveProjectDefaults() {
-  const btn     = document.getElementById('cfg-project-save-btn');
-  const input   = document.getElementById('cfg-project');
-  const project = input.value.trim();
-  if (!project) {
-    input.focus();
-    input.style.borderColor = '#f43f5e';
-    input.style.boxShadow   = '0 0 0 3px rgba(244,63,94,.2)';
-    btn.textContent = '❌ Project name is required';
-    setTimeout(() => {
-      input.style.borderColor = '';
-      input.style.boxShadow   = '';
-      btn.textContent = '💾 Save';
-    }, 2500);
-    return;
-  }
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
-  try {
-    const res  = await fetch('/api/config');
-    const cfg  = await res.json();
-    cfg.project      = project;
-    cfg.poll_interval = parseInt(document.getElementById('cfg-poll').value) || cfg.poll_interval;
-    const r = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg) });
-    const d = await r.json();
-    btn.textContent = d.ok ? '✓ Saved' : '❌ Failed';
-    setTimeout(() => { btn.textContent = '💾 Save'; btn.disabled = false; }, 2000);
-  } catch(e) {
-    btn.textContent = '❌ Error';
-    setTimeout(() => { btn.textContent = '💾 Save'; btn.disabled = false; }, 2000);
-  }
+  setTimeout(() => { btn.textContent = originalLabel; btn.disabled = false; }, 2500);
 }
 
 async function saveKowlConfig() {
   const btn    = document.getElementById('cfg-kowl-save-btn');
   const status = document.getElementById('cfg-kowl-status');
+  const projectInput = document.getElementById('cfg-project-kowl');
+  const originalLabel = btn.textContent;
+
+  // Project is required — golden data is grouped under this name
+  if (!projectInput.value.trim()) {
+    projectInput.focus();
+    projectInput.style.borderColor = '#f43f5e';
+    projectInput.style.boxShadow   = '0 0 0 3px rgba(244,63,94,.2)';
+    status.textContent = '❌ Project name is required';
+    status.style.color = '#fca5a5';
+    setTimeout(() => {
+      projectInput.style.borderColor = '';
+      projectInput.style.boxShadow   = '';
+      status.textContent = '';
+    }, 2500);
+    return false;
+  }
+
   btn.disabled = true;
   const payload = {
+    kowl_project:   projectInput.value.trim(),
     topic_host:     document.getElementById('cfg-topic-host').value.trim(),
     topic_host_b:   document.getElementById('cfg-topic-host-b').value.trim(),
     topic_prefix:   document.getElementById('cfg-topic-prefix').value.trim(),
@@ -1586,10 +1844,10 @@ async function saveKowlConfig() {
     body: JSON.stringify(payload)
   });
   const data = await res.json();
-  btn.disabled = false;
-  status.textContent = data.ok ? '✅ Saved!' : '❌ ' + data.error;
-  status.style.color = data.ok ? '#86efac' : '#fca5a5';
-  setTimeout(() => status.textContent = '', 3000);
+  btn.textContent = data.ok ? '✓ Saved' : '❌ Failed';
+  status.textContent = data.ok ? '' : '❌ ' + data.error;
+  status.style.color = '#fca5a5';
+  setTimeout(() => { btn.textContent = originalLabel; btn.disabled = false; status.textContent = ''; }, 2000);
   if (data.ok) {
     // Keep in-memory topicCfg in sync so compare/capture pick up changes immediately
     topicCfg = {
@@ -1604,19 +1862,24 @@ async function saveKowlConfig() {
   return data.ok;
 }
 
-async function testKowlConnection() {
-  const btn    = document.getElementById('cfg-kowl-test-btn');
+async function testKowlConnection(target = false) {
+  const btn    = document.getElementById(target ? 'cfg-kowl-test-btn-b' : 'cfg-kowl-test-btn');
   const status = document.getElementById('cfg-kowl-status');
+  const originalLabel = btn.textContent;
   const saved  = await saveKowlConfig();
   if (!saved) return;
   btn.disabled = true;
-  status.textContent = '🔄 Testing Kowl...';
-  status.style.color = '#93c5fd';
-  const res  = await fetch('/api/config/test-kowl', {method:'POST'});
+  btn.textContent = '🔄 Testing...';
+  status.textContent = '';
+  const res  = await fetch('/api/config/test-kowl', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({target})
+  });
   const data = await res.json();
+  btn.textContent = data.ok ? '✓ OK' : '❌ Failed';
   status.textContent = data.msg;
   status.style.color = data.ok ? '#86efac' : '#fca5a5';
-  btn.disabled = false;
+  setTimeout(() => { btn.textContent = originalLabel; btn.disabled = false; }, 2500);
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -1928,8 +2191,9 @@ function renderTopicResults(results) {
   document.getElementById('tc-summary').style.display = 'flex';
   document.getElementById('tc-total').textContent = results.length;
   document.getElementById('tc-pass').textContent  = results.filter(r => r.status === 'PASS').length;
+  document.getElementById('tc-warn').textContent  = results.filter(passedWithWarning).length;
   document.getElementById('tc-fail').textContent  = results.filter(r => r.status === 'FAIL').length;
-  document.getElementById('tc-nob').textContent   = results.filter(r => r.status !== 'PASS' && r.status !== 'FAIL').length;
+  document.getElementById('tc-nob').textContent   = results.filter(r => !['PASS', 'FAIL'].includes(r.status)).length;
   if (!results.length) {
     body.innerHTML = '<tr><td colspan="6"><div class="no-results">No messages returned from the target topics.</div></td></tr>';
     return;
@@ -2026,7 +2290,17 @@ async function loadReports() {
   try {
     _allReports = await (await fetch('/api/reports')).json();
     renderReports();
+    renderSubscriberReports();
   } catch (e) {}
+}
+
+function toggleReportsSection(wrapId, btnId) {
+  const wrap = document.getElementById(wrapId);
+  const btn  = document.getElementById(btnId);
+  if (!wrap) return;
+  const opening = wrap.classList.contains('hidden');
+  wrap.classList.toggle('hidden');
+  if (btn) btn.textContent = opening ? '⤡ Minimize' : '⤢ Expand';
 }
 
 function renderReports() {
@@ -2037,7 +2311,12 @@ function renderReports() {
   const q    = (searchEl ? searchEl.value : '').trim().toLowerCase();
   const sort = sortEl ? sortEl.value : 'time-desc';
 
-  let reports = _allReports.filter(rep =>
+  // Subscriber compare reports get their own section below — keep them out of
+  // the main Past Reports list so the two report kinds don't get mixed up.
+  const byKind = _allReports.filter(rep => rep.kind !== 'subscriber_compare');
+  const countEl = document.getElementById('rep-toggle-count');
+  if (countEl) countEl.textContent = byKind.length ? `(${byKind.length})` : '';
+  let reports = byKind.filter(rep =>
     !q || rep.name.toLowerCase().includes(q) || (rep.project || '').toLowerCase().includes(q));
 
   reports = reports.slice().sort((a, b) => {
@@ -2055,7 +2334,7 @@ function renderReports() {
         const idBadge = `<span class="badge badge-info" style="margin-right:8px">#${rep.id ?? '?'}</span>`;
         const title = hasMeta
           ? `<b>${rep.project || '(none)'}</b> · ${rep.created || ''}`
-          : `${n} <span style="color:#475569">· ${rep.created || ''}</span>`;
+          : `${n} <span style="color:var(--text-dim)">· ${rep.created || ''}</span>`;
         const counts = hasMeta
           ? `<span style="margin-left:10px;font-size:11px">
                <span style="color:var(--log-pass,#86efac)">✅ ${rep.pass}</span>
@@ -2067,19 +2346,104 @@ function renderReports() {
         const allureBtns =
           (rep.allure_html ? `<a class="btn-xs btn-xs-view" style="background:#14532d;color:var(--log-pass,#86efac)" href="/api/allure-html/${rep.allure_html.replace('-html','')}/" target="_blank" title="Open Allure HTML report">📊 Allure</a>` : '') +
           (rep.allure_zip ? `<a class="btn-xs btn-xs-view" href="/api/allure/${encodeURIComponent(rep.allure_zip)}" download title="Download allure-results (.zip)">📦 .zip</a>` : '');
+        const rid = `rep-detail-${cssEscapeId(n)}`;
+        const flowRows = Object.entries(rep.per_flow || {});
+        const detail = flowRows.length
+          ? `<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px">
+              <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
+                <th style="padding:3px 8px">FLOW</th><th style="padding:3px 8px">PASS</th><th style="padding:3px 8px">FAIL</th><th style="padding:3px 8px">TOTAL</th>
+              </tr></thead>
+              <tbody>${flowRows.map(([flow, s]) => `<tr>
+                <td style="padding:3px 8px">${escapeHtml(flow)}</td>
+                <td style="padding:3px 8px;color:var(--log-pass,#86efac)">${s.pass}</td>
+                <td style="padding:3px 8px;color:var(--log-fail,#fca5a5)">${s.fail}</td>
+                <td style="padding:3px 8px;color:var(--text-muted)">${s.total}</td>
+              </tr>`).join('')}</tbody>
+            </table>`
+          : '<div style="color:var(--text-dim);font-size:12px;padding:6px 0">No per-flow breakdown stored for this report.</div>';
         return `
-        <div class="golden-item">
-          <span class="golden-name"><input type="checkbox" class="rep-check" value="${n}" onchange="updateReportSelCount()">${idBadge}${kindIcon} ${title} ${counts}</span>
-          <div class="golden-actions">
-            <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}" target="_blank">Open</a>
-            <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}?download=1" download>Download</a>
-            ${allureBtns}
-            <button class="btn-xs btn-xs-del" onclick="deleteReport('${n}')">Delete</button>
+        <div class="report-entry">
+          <div class="golden-item" style="cursor:pointer" onclick="toggleReportDetail(event, '${rid}')">
+            <span class="golden-name"><input type="checkbox" class="rep-check" value="${n}" onclick="event.stopPropagation()" onchange="updateReportSelCount()">
+              <span class="rep-arrow">▸</span> ${idBadge}${kindIcon} ${title} ${counts}</span>
+            <div class="golden-actions" onclick="event.stopPropagation()">
+              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}" target="_blank">Open</a>
+              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}?download=1" download>Download</a>
+              ${allureBtns}
+              <button class="btn-xs btn-xs-del" onclick="deleteReport('${n}')">Delete</button>
+            </div>
           </div>
+          <div id="${rid}" class="report-detail hidden">${detail}</div>
         </div>`;
       }).join('')
     : (_allReports.length ? 'No reports match your search.' : 'No reports yet.');
   updateReportSelCount();
+}
+
+function cssEscapeId(s) {
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function toggleReportDetail(evt, rid) {
+  const detail = document.getElementById(rid);
+  if (!detail) return;
+  const arrow = evt.currentTarget.querySelector('.rep-arrow');
+  const open  = !detail.classList.contains('hidden');
+  detail.classList.toggle('hidden');
+  if (arrow) arrow.textContent = open ? '▸' : '▾';
+}
+
+function renderSubscriberReports() {
+  const el = document.getElementById('dash-subscriber-reports');
+  if (!el) return;
+  const reports = _allReports.filter(rep => rep.kind === 'subscriber_compare')
+    .slice().sort((a, b) => (b.id || 0) - (a.id || 0));
+  const countEl = document.getElementById('sub-rep-toggle-count');
+  if (countEl) countEl.textContent = reports.length ? `(${reports.length})` : '';
+  el.innerHTML = reports.length
+    ? reports.map(rep => {
+        const n = rep.name;
+        const title = `<b>${rep.project || '(none)'}</b> · ${rep.created || ''}`;
+        const counts = rep.total !== undefined
+          ? `<span style="margin-left:10px;font-size:11px">
+               <span style="color:var(--log-pass,#86efac)">✅ ${rep.pass}</span>
+               <span style="color:var(--log-fail,#fca5a5);margin-left:6px">❌ ${rep.fail}</span>
+               <span style="color:var(--text-muted);margin-left:6px">/ ${rep.total}</span>
+             </span>`
+          : '';
+        const rid = `rep-detail-${cssEscapeId(n)}`;
+        const items = rep.items || [];
+        const detail = items.length
+          ? `<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:6px">
+              <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
+                <th style="padding:3px 8px">LABEL</th><th style="padding:3px 8px">PATTERN</th><th style="padding:3px 8px">STATUS</th>
+              </tr></thead>
+              <tbody>${items.map(it => {
+                const c = it.status === 'PASS' ? 'var(--log-pass,#86efac)' : it.status === 'FAIL' ? 'var(--log-fail,#fca5a5)' : '#fbbf24';
+                return `<tr>
+                <td style="padding:3px 8px">${escapeHtml(it.label)}</td>
+                <td style="padding:3px 8px;font-family:monospace">${escapeHtml(it.pattern)}</td>
+                <td style="padding:3px 8px;color:${c}">${escapeHtml(it.status)}</td>
+              </tr>`;
+              }).join('')}</tbody>
+            </table>`
+          : '<div style="color:var(--text-dim);font-size:12px;padding:6px 0">No per-pattern breakdown stored for this report.</div>';
+        return `
+        <div class="report-entry">
+          <div class="golden-item" style="cursor:pointer" onclick="toggleReportDetail(event, '${rid}')">
+            <span class="golden-name"><input type="checkbox" class="rep-check" value="${n}" onclick="event.stopPropagation()" onchange="updateSubscriberReportSelCount()">
+              <span class="rep-arrow">▸</span> 👤 ${title} ${counts}</span>
+            <div class="golden-actions" onclick="event.stopPropagation()">
+              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}" target="_blank">Open</a>
+              <a class="btn-xs btn-xs-view" href="/api/report/${encodeURIComponent(n)}?download=1" download>Download</a>
+              <button class="btn-xs btn-xs-del" onclick="deleteReport('${n}')">Delete</button>
+            </div>
+          </div>
+          <div id="${rid}" class="report-detail hidden">${detail}</div>
+        </div>`;
+      }).join('')
+    : 'No subscriber compare reports yet.';
+  updateSubscriberReportSelCount();
 }
 
 function selectedReportNames() {
@@ -2102,8 +2466,32 @@ async function deleteSelectedReports() {
   loadReports();
 }
 async function deleteAllReports() {
-  if (!confirm('⚠️ Delete ALL reports? This cannot be undone.')) return;
-  await fetch('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({all: true})});
+  if (!confirm('⚠️ Delete ALL past reports? This cannot be undone. (Subscriber Compare Reports are untouched.)')) return;
+  await fetch('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({all: true, exclude_kind: 'subscriber_compare'})});
+  loadReports();
+}
+
+// Subscriber Compare Reports has its own independent selection/delete —
+// deleting here (or in Past Reports above) never touches the other section.
+function selectedSubscriberReportNames() {
+  return Array.from(document.querySelectorAll('#dash-subscriber-reports .rep-check:checked')).map(c => c.value);
+}
+function updateSubscriberReportSelCount() {
+  const el = document.getElementById('sub-rep-sel-count');
+  if (el) el.textContent = selectedSubscriberReportNames().length;
+}
+async function deleteSelectedSubscriberReports() {
+  const names = selectedSubscriberReportNames();
+  if (!names.length) { alert('No reports selected.'); return; }
+  if (!confirm(`Delete ${names.length} selected subscriber compare report(s)?`)) return;
+  await fetch('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({names})});
+  loadReports();
+}
+async function deleteAllSubscriberReports() {
+  if (!confirm('⚠️ Delete ALL subscriber compare reports? This cannot be undone. (Past Reports are untouched.)')) return;
+  await fetch('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({all: true, kind: 'subscriber_compare'})});
   loadReports();
 }
 

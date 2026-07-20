@@ -1,4 +1,5 @@
 # ─── Secrets (NEVER commit) ──────────────────────────────────────────────────
+.config_key
 .secrets
 *.pem
 *.key
@@ -6,9 +7,10 @@ id_rsa*
 *_rsa
 *.ppk
 
-# ─── Local config that may hold host/IP details ──────────────────────────────
-# config.json is tracked by default; uncomment if it holds anything sensitive:
-# config.json
+# ─── Local config ─────────────────────────────────────────────────────────────
+# config.json holds host/IP details plus encrypted DB password blobs (see
+# .config_key above) — never commit it.
+config.json
 
 # ─── Captured data / generated output ────────────────────────────────────────
 topic_baseline/*.json

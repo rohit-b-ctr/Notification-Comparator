@@ -65,13 +65,7 @@
       <label style="margin-bottom:6px">Compare against golden source</label>
       <div class="flow-pills" style="margin-bottom:8px">
         <div class="flow-pill active pill-put" id="fullrun-gs-db"   onclick="setFullRunGolden('db')">🗄 DB</div>
-        <div class="flow-pill pill-other"      id="fullrun-gs-isd"  onclick="setFullRunGolden('isd')">📄 ISD</div>
         <div class="flow-pill pill-pick"       id="fullrun-gs-kowl" onclick="setFullRunGolden('kowl')">🧬 Kowl</div>
-      </div>
-      <div id="fullrun-isd-data" class="flow-pills" style="margin-bottom:14px;display:none">
-        <span style="font-size:11px;color:var(--text-dim);margin-right:2px">ISD golden vs live data from:</span>
-        <div class="flow-pill active pill-put" id="fullrun-isd-db"   onclick="setFullRunIsdData('db')">🗄 DB</div>
-        <div class="flow-pill pill-pick"       id="fullrun-isd-kowl" onclick="setFullRunIsdData('kowl')">🧬 Kowl</div>
       </div>
       <div class="flex-row">
         <div>
@@ -100,6 +94,7 @@
       <div class="summary-strip">
         <div class="summary-card"><div class="num num-total" id="fr-total">0</div><div class="lbl">Total</div></div>
         <div class="summary-card"><div class="num num-pass"  id="fr-pass">0</div><div class="lbl">Pass ✅</div></div>
+        <div class="summary-card"><div class="num num-warn"  id="fr-warning" style="color:#fbbf24">0</div><div class="lbl">Passed w/ Warning 🟡</div></div>
         <div class="summary-card"><div class="num num-fail"  id="fr-fail">0</div><div class="lbl">Fail ❌</div></div>
         <div class="summary-card"><div class="num num-warn"  id="fr-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
       </div>
@@ -141,23 +136,41 @@
 
     <div class="card mt">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-        <div class="card-title" style="margin:0">Past Reports</div>
+        <div class="card-title" style="margin:0">Past Reports <span id="rep-toggle-count" style="font-weight:400;color:var(--text-dim);font-size:12px"></span></div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="rep-toggle-btn" onclick="toggleReportsSection('dash-reports-wrap', 'rep-toggle-btn')">⤢ Expand</button>
           <button class="btn btn-danger" onclick="deleteSelectedReports()">🗑 Delete Selected (<span id="rep-sel-count">0</span>)</button>
           <button class="btn btn-danger" onclick="deleteAllReports()">🗑 Delete All</button>
           <button class="btn btn-ghost" onclick="loadReports()">↻ Refresh</button>
         </div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-        <input type="search" id="rep-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" placeholder="🔎 Search by name or project…" style="flex:1;min-width:180px" oninput="renderReports()">
-        <select id="rep-sort" onchange="renderReports()" style="width:auto">
-          <option value="time-desc">Newest first</option>
-          <option value="time-asc">Oldest first</option>
-          <option value="name-asc">Name (A → Z)</option>
-          <option value="name-desc">Name (Z → A)</option>
-        </select>
+      <div id="dash-reports-wrap" class="hidden">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+          <input type="search" id="rep-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" placeholder="🔎 Search by name or project…" style="flex:1;min-width:180px" oninput="renderReports()">
+          <select id="rep-sort" onchange="renderReports()" style="width:auto">
+            <option value="time-desc">Newest first</option>
+            <option value="time-asc">Oldest first</option>
+            <option value="name-asc">Name (A → Z)</option>
+            <option value="name-desc">Name (Z → A)</option>
+          </select>
+        </div>
+        <div id="dash-reports" style="color:var(--text-dim);font-size:13px">No reports yet.</div>
       </div>
-      <div id="dash-reports" style="color:var(--text-dim);font-size:13px">No reports yet.</div>
+    </div>
+
+    <div class="card mt">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div class="card-title" style="margin:0">👤 Subscriber Compare Reports <span id="sub-rep-toggle-count" style="font-weight:400;color:var(--text-dim);font-size:12px"></span></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="sub-rep-toggle-btn" onclick="toggleReportsSection('dash-subscriber-reports-wrap', 'sub-rep-toggle-btn')">⤢ Expand</button>
+          <button class="btn btn-danger" onclick="deleteSelectedSubscriberReports()">🗑 Delete Selected (<span id="sub-rep-sel-count">0</span>)</button>
+          <button class="btn btn-danger" onclick="deleteAllSubscriberReports()">🗑 Delete All</button>
+          <button class="btn btn-ghost" onclick="loadReports()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="dash-subscriber-reports-wrap" class="hidden">
+        <div id="dash-subscriber-reports" style="color:var(--text-dim);font-size:13px">No subscriber compare reports yet.</div>
+      </div>
     </div>
   </div>
 
@@ -170,6 +183,7 @@
       <div class="flow-pill active pill-put"  id="cap-src-tab-db"   onclick="switchCapSource('db')">🗄 From DB</div>
       <div class="flow-pill pill-pick"         id="cap-src-tab-kowl" onclick="switchCapSource('kowl')">🧬 From Kowl</div>
       <div class="flow-pill pill-other"        id="cap-src-tab-isd"  onclick="switchCapSource('isd')">📄 From ISD</div>
+      <div class="flow-pill pill-audit"        id="cap-src-tab-subscriber" onclick="switchCapSource('subscriber')">👤 Subscriber</div>
     </div>
 
     <!-- SOURCE: DB -->
@@ -191,7 +205,7 @@
 
         <div class="flow-sub-row">
           <div class="sub-input-wrap" style="flex:1">
-            <label>Pattern(s) <span style="font-weight:400;color:#334155">— from Config; check the ones to capture</span></label>
+            <label>Pattern(s) <span style="font-weight:400;color:var(--text-dim)">— from Config; check the ones to capture</span></label>
             <div id="cap-pattern-checks" style="font-size:12px;font-family:monospace;color:#a5b4fc;max-height:140px;overflow-y:auto"></div>
           </div>
         </div>
@@ -231,7 +245,7 @@
 
         <div class="flex-row">
           <div class="sub-input-wrap" style="flex:1">
-            <label>Pattern(s) <span style="font-weight:400;color:#334155">— from Config; check the ones to capture</span></label>
+            <label>Pattern(s) <span style="font-weight:400;color:var(--text-dim)">— from Config; check the ones to capture</span></label>
             <div id="cap-live-pattern-checks" style="font-size:12px;font-family:monospace;color:#a5b4fc;max-height:140px;overflow-y:auto"></div>
           </div>
           <div>
@@ -298,7 +312,6 @@
         </div>
         <div id="tc-baseline-list"><div class="no-results">No baseline captured yet.</div></div>
       </div>
-    </div>
 
       <div class="card">
         <div class="card-title">⚡ Live Capture</div>
@@ -316,17 +329,24 @@
         </div>
         <div class="log-box" id="kc-log" style="display:none;margin-top:12px"></div>
       </div>
-
-      
+    </div><!-- /cap-src-kowl -->
 
     <!-- SOURCE: ISD -->
     <div id="cap-src-isd" style="display:none">
       <div class="card">
+        <div class="card-title">💾 Save under</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px">Applies to both ISD capture methods below — the PDF upload and the paste box.</p>
+        <div class="flow-pills">
+          <div class="flow-pill active pill-put" id="isd-target-db"   onclick="setIsdTargetProject('db')">🗄 DB Project (<span id="isd-target-db-name">none</span>)</div>
+          <div class="flow-pill pill-pick"      id="isd-target-kowl"  onclick="setIsdTargetProject('kowl')">🧬 Kowl Project (<span id="isd-target-kowl-name">none</span>)</div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-title">📄 Generate golden from an ISD document (PDF)</div>
         <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
           Upload the Interface Specification Document. Sample notification payloads found in the PDF are
-          extracted and saved as golden data under the current project
-          (<b id="cap-isd-project" style="color:#a5b4fc">none</b>).</p>
+          extracted and saved as golden data under the project selected above.</p>
         <label>ISD PDF file</label>
         <input type="file" id="cap-isd-file" accept="application/pdf"
                class="themed-file-input">
@@ -341,7 +361,7 @@
 
       <div class="card">
         <div class="card-title">➕ Paste payload(s) as golden</div>
-        <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px">Some ISD payloads (large PICK/audit samples) can't be auto-extracted because the PDF's JSON is malformed (smart quotes, line-wrapped tokens). Copy a payload from the doc, paste it here, click <b>✨ Beautify</b> to validate/fix, then save. Accepts one object, an array, or several pasted objects.</p>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px">Some ISD payloads (large PICK/audit samples) can't be auto-extracted because the PDF's JSON is malformed (smart quotes, line-wrapped tokens). Copy a payload from the doc, paste it here, click <b>✨ Beautify</b> to validate/fix, then save. Accepts one object, an array, or several pasted objects — plain ISD payloads, or a raw Kowl message/envelope (partitionID/offset/value.payload) copied straight from a Kowl capture.</p>
         <textarea id="isd-paste" rows="10" spellcheck="false"
           class="mono-textarea" placeholder='Paste an ISD notification payload (the whole { "id": ..., "payload": { ... } } block)'></textarea>
         <div class="mt" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -350,6 +370,25 @@
           <span id="isd-paste-status" style="font-size:12px"></span>
         </div>
         <div id="isd-paste-result" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <!-- SOURCE: SUBSCRIBER -->
+    <div id="cap-src-subscriber" style="display:none">
+      <div class="card">
+        <div class="card-title">👤 Snapshot subscriber config (baseline)</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
+          For every pattern configured on the Config tab, fetch the matching row from the
+          <code>subscriber</code> table on the <b>baseline</b> env and store it under the current project
+          (<b id="cap-subscriber-project" style="color:#a5b4fc">none</b>) → <code>subscriber/</code>, one file per pattern label.
+          Used later to detect subscriber config drift on the target env.</p>
+        <div class="mt">
+          <button class="btn btn-success" onclick="doCaptureSubscriber()" id="cap-subscriber-btn">📸 Capture Subscriber Snapshot</button>
+        </div>
+      </div>
+      <div class="card" id="cap-subscriber-result" style="display:none">
+        <div class="card-title">Result</div>
+        <div id="cap-subscriber-result-body"></div>
       </div>
     </div>
   </div>
@@ -362,18 +401,11 @@
     <div class="flow-pills" style="margin-bottom:16px;align-items:center">
       <span style="font-size:11px;color:var(--text-dim);margin-right:2px">Golden compare:</span>
       <div class="flow-pill active pill-put" id="cmp-gs-db"   onclick="setCompareGolden('db')">🗄 DB</div>
-      <div class="flow-pill pill-other"      id="cmp-gs-isd"  onclick="setCompareGolden('isd')">📄 ISD</div>
       <div class="flow-pill pill-pick"       id="cmp-gs-kowl" onclick="setCompareGolden('kowl')">🧬 Kowl</div>
       <span style="display:inline-block;width:1px;height:22px;background:#2d3148;margin:0 10px"></span>
       <div class="flow-pill pill-audit"      id="cmp-gs-json" onclick="setCompareGolden('json')">🧩 Direct JSON</div>
       <div class="flow-pill pill-other"      id="cmp-gs-xml"  onclick="setCompareGolden('xml')">📰 Direct XML</div>
-    </div>
-
-    <!-- ISD golden can validate either DB-fetched or Kowl-fetched live data -->
-    <div id="cmp-isd-data" class="flow-pills" style="margin-bottom:16px;align-items:center;display:none">
-      <span style="font-size:11px;color:var(--text-dim);margin-right:2px">ISD golden vs live data from:</span>
-      <div class="flow-pill active pill-put" id="cmp-isd-db"   onclick="setIsdDataSource('db')">🗄 DB</div>
-      <div class="flow-pill pill-pick"       id="cmp-isd-kowl" onclick="setIsdDataSource('kowl')">🧬 Kowl</div>
+      <div class="flow-pill pill-other"      id="cmp-gs-subscriber" onclick="setCompareGolden('subscriber')">👤 Subscriber</div>
     </div>
 
     <div class="tabs" id="cmp-tabs-row">
@@ -384,9 +416,14 @@
     <div id="cmp-src-notif">
     <div class="card">
       <div class="flow-sub-row" style="margin-bottom:14px">
-        <div class="sub-input-wrap">
-          <label>Pattern</label>
-          <input type="text" id="cmp-pattern" list="cfg-patterns-datalist" placeholder="e.g. put_information">
+        <div class="sub-input-wrap" style="flex:1">
+          <label>Pattern(s)</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="cmp-pattern" list="cfg-patterns-datalist" placeholder="e.g. put_information — press Enter or + to add"
+                   style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addCmpPattern();}">
+            <button type="button" class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="addCmpPattern()">+ Add</button>
+          </div>
+          <div id="cmp-pattern-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         </div>
       </div>
 
@@ -423,6 +460,7 @@
         <div class="summary-card"><div class="num num-fail" id="cmp-fail">0</div><div class="lbl">Fail ❌</div></div>
         <div class="summary-card"><div class="num num-warn" id="cmp-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
       </div>
+      <div id="cmp-skipped-note" style="display:none;font-size:11px;color:var(--text-dim);margin-top:6px"></div>
     </div>
     <div class="card" id="cmp-results-card" style="display:none">
       <div class="card-title">Results</div>
@@ -551,6 +589,30 @@
       </div>
     </div>
 
+    <!-- COMPARE: Subscriber snapshot (target env subscriber row vs baseline snapshot) -->
+    <div id="cmp-src-subscriber" style="display:none">
+      <div class="card">
+        <div class="card-title">👤 Compare subscriber config: target env vs baseline snapshot</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
+          For every pattern configured on the Config tab, fetch the matching <code>subscriber</code> row
+          from the <b>target</b> env and diff it against the baseline snapshot saved via
+          Capture Golden → 👤 Subscriber.</p>
+        <div class="mt">
+          <button class="btn btn-primary" onclick="doCompareSubscriber()" id="cmp-subscriber-btn">🔍 Compare Subscribers</button>
+        </div>
+      </div>
+      <div class="card" id="cmp-subscriber-result" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div class="card-title" style="margin:0">Results <span style="font-weight:400;color:var(--text-dim);font-size:12px">(click a row to expand its diffs)</span></div>
+          <div id="cmp-subscriber-report-bar" style="display:none;gap:8px"></div>
+        </div>
+        <table class="results-table">
+          <thead><tr><th>Label</th><th>Pattern</th><th>Status</th><th>Diffs</th></tr></thead>
+          <tbody id="cmp-subscriber-result-body"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- COMPARE: Kowl golden (fetch topics, diff vs kowl baseline) -->
     <div id="cmp-src-kowl" style="display:none">
       <div class="card">
@@ -580,6 +642,7 @@
       <div class="summary-strip" id="tc-summary" style="display:none">
         <div class="summary-card"><div class="num" id="tc-total" style="color:#93c5fd">0</div><div class="lbl">Total</div></div>
         <div class="summary-card"><div class="num" id="tc-pass"  style="color:#86efac">0</div><div class="lbl">Pass</div></div>
+        <div class="summary-card"><div class="num" id="tc-warn"  style="color:#fbbf24">0</div><div class="lbl">Passed w/ Warning</div></div>
         <div class="summary-card"><div class="num" id="tc-fail"  style="color:#fca5a5">0</div><div class="lbl">Fail</div></div>
         <div class="summary-card"><div class="num" id="tc-nob"   style="color:#fcd34d">0</div><div class="lbl">No Baseline</div></div>
       </div>
@@ -612,13 +675,7 @@
         <label>Compare against golden source</label>
         <div class="flow-pills">
           <div class="flow-pill active pill-put" id="watch-gs-db"   onclick="setWatchGolden('db')">🗄 DB</div>
-          <div class="flow-pill pill-other"      id="watch-gs-isd"  onclick="setWatchGolden('isd')">📄 ISD</div>
           <div class="flow-pill pill-pick"       id="watch-gs-kowl" onclick="setWatchGolden('kowl')">🧬 Kowl</div>
-        </div>
-        <div id="watch-isd-data" class="flow-pills" style="margin-top:8px;display:none">
-          <span style="font-size:11px;color:var(--text-dim);margin-right:2px">ISD golden vs live data from:</span>
-          <div class="flow-pill active pill-put" id="watch-isd-db"   onclick="setWatchIsdData('db')">🗄 DB</div>
-          <div class="flow-pill pill-pick"       id="watch-isd-kowl" onclick="setWatchIsdData('kowl')">🧬 Kowl</div>
         </div>
       </div>
 
@@ -661,6 +718,7 @@
       <div class="summary-strip">
         <div class="summary-card"><div class="num num-total" id="w-total">0</div><div class="lbl">Total</div></div>
         <div class="summary-card"><div class="num num-pass"  id="w-pass">0</div><div class="lbl">Pass ✅</div></div>
+        <div class="summary-card"><div class="num num-warn"  id="w-warning" style="color:#fbbf24">0</div><div class="lbl">Passed w/ Warning 🟡</div></div>
         <div class="summary-card"><div class="num num-fail"  id="w-fail">0</div><div class="lbl">Fail ❌</div></div>
         <div class="summary-card"><div class="num num-warn"  id="w-nogolden">0</div><div class="lbl">No Golden ⚠️</div></div>
       </div>
@@ -690,99 +748,61 @@
       ⚠️ <strong>Secrets required</strong> — Enter DB password and SSH key path below before connecting.
     </div>
 
-    <!-- SECRETS SECTION -->
-    <div class="card" style="border-color:#4f46e5">
-      <div class="card-title" style="color:#a5b4fc">🔒 Secrets</div>
-
-      <!-- Auto-loaded banner -->
-      <div id="cfg-secrets-loaded-banner" class="alert-banner alert-success" style="display:none;flex-direction:row;align-items:center;justify-content:space-between">
-        <span>✅ Secrets auto-loaded from saved file</span>
-        <button class="btn-xs btn-xs-del" onclick="clearSavedSecrets()">🗑 Remove saved file</button>
-      </div>
-
-      <div class="flex-row">
-
-        <!-- SSH Key -->
-        <div style="flex:1">
-          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-            <span class="secret-pill secret-pill-indigo">SSH KEY</span>
-            <span class="secret-hint">path to private key file</span>
-          </label>
-          <div class="secret-input-wrap" onfocusin="this.classList.add('focused')" onfocusout="this.classList.remove('focused')">
-            <div class="secret-icon">🗝️</div>
-            <input type="password" id="cfg-ssh-key" placeholder="e.g. ~/.ssh/id_rsa" class="secret-input">
-            <button type="button" id="cfg-ssh-key-toggle" class="secret-toggle" onclick="toggleVisible('cfg-ssh-key','cfg-ssh-key-toggle')">👁 Show</button>
-          </div>
-        </div>
-
-        <!-- DB Password (baseline) -->
-        <div style="flex:1">
-          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-            <span class="secret-pill secret-pill-amber">DB PASS</span>
-            <span class="secret-hint">baseline postgres password</span>
-          </label>
-          <div class="secret-input-wrap" onfocusin="this.classList.add('focused')" onfocusout="this.classList.remove('focused')">
-            <div class="secret-icon">🔑</div>
-            <input type="password" id="cfg-db-pass" placeholder="Enter password" class="secret-input">
-            <button type="button" id="cfg-db-pass-toggle" class="secret-toggle" onclick="toggleVisible('cfg-db-pass','cfg-db-pass-toggle')">👁 Show</button>
-          </div>
-        </div>
-
-        <!-- DB Password (target) -->
-        <div style="flex:1">
-          <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-            <span class="secret-pill secret-pill-amber">DB PASS (TARGET)</span>
-            <span class="secret-hint">target postgres password</span>
-          </label>
-          <div class="secret-input-wrap" onfocusin="this.classList.add('focused')" onfocusout="this.classList.remove('focused')">
-            <div class="secret-icon">🔑</div>
-            <input type="password" id="cfg-db-pass-b" placeholder="Enter password" class="secret-input">
-            <button type="button" id="cfg-db-pass-b-toggle" class="secret-toggle" onclick="toggleVisible('cfg-db-pass-b','cfg-db-pass-b-toggle')">👁 Show</button>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- Save to disk toggle -->
-      <label for="cfg-save-disk" style="margin-top:14px;display:flex;align-items:center;gap:10px;cursor:pointer">
-        <input type="checkbox" id="cfg-save-disk" style="width:16px;height:16px;accent-color:#4f46e5;cursor:pointer">
-        <span style="font-size:13px" class="muted-text">Save to disk <span class="dim-text" style="font-size:12px">(stores in <code>.secrets</code> file — skip re-entry on restart)</span></span>
-      </label>
-
-      <div class="mt" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="saveSecrets()" id="cfg-secrets-btn">🔒 Set Secrets</button>
-        <span id="cfg-secrets-status" style="font-size:13px"></span>
-      </div>
-    </div>
-
     <!-- ── PostgreSQL / DB Config ─────────────────────────────────────── -->
     <div class="card" style="border-color:#1e3a5f">
       <div class="card-title" style="color:#93c5fd;justify-content:space-between">
         <span>🗄 PostgreSQL &amp; SSH</span>
-        <span style="font-size:11px;font-weight:400;color:#3b5270;letter-spacing:.3px">DATABASE CONNECTION</span>
+        <span style="font-size:11px;font-weight:400;color:var(--text-dim);letter-spacing:.3px">DATABASE CONNECTION</span>
       </div>
+
+      <!-- Auto-loaded banner -->
+      <div id="cfg-secrets-loaded-banner" class="alert-banner alert-success" style="display:none;flex-direction:row;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <span>✅ Secrets auto-loaded from saved file</span>
+        <button class="btn-xs btn-xs-del" onclick="clearSavedSecrets()">🗑 Remove saved file</button>
+      </div>
+
+      <!-- Project & poll interval -->
+      <div style="display:grid;grid-template-columns:1fr 160px;gap:12px;margin-bottom:12px">
+        <div>
+          <label>Current project <span style="color:var(--log-fail);font-weight:700" title="Required">*</span> <span style="color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0">— golden data is grouped under this name</span></label>
+          <input type="text" id="cfg-project" placeholder="e.g. SBSCloud_2026" list="cfg-project-list" required>
+          <datalist id="cfg-project-list"></datalist>
+          <p style="font-size:11px;color:var(--text-dim);margin-top:5px">Stored under <code style="color:#4ade80">golden/{project}/…</code></p>
+        </div>
+        <div>
+          <label>Poll interval (s)</label>
+          <input type="number" id="cfg-poll">
+        </div>
+      </div>
+
+      <!-- divider -->
+      <div style="border-top:1px solid #1e2a3a;margin:4px 0 14px"></div>
 
       <!-- SSH hosts row (baseline / target) -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
-          <label>Baseline SSH Host <span style="color:#334155;font-weight:400">(capture env)</span></label>
+          <label>Baseline SSH Host <span style="color:var(--text-dim);font-weight:400">(capture env)</span></label>
           <input type="text" id="cfg-ssh-host">
         </div>
         <div>
-          <label>Target SSH Host <span style="color:#334155;font-weight:400">(compare env)</span></label>
+          <label>Target SSH Host <span style="color:var(--text-dim);font-weight:400">(compare env)</span></label>
           <input type="text" id="cfg-ssh-host-b">
         </div>
       </div>
 
       <!-- SSH shared row -->
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;margin-bottom:12px">
-        <div>
-          <label>SSH Port</label>
-          <input type="number" id="cfg-ssh-port">
-        </div>
+      <div style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>SSH User</label>
           <input type="text" id="cfg-ssh-user">
+        </div>
+      </div>
+
+      <!-- SSH Key -->
+      <div style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px">
+        <div>
+          <label>SSH Key <span style="color:var(--text-dim);font-weight:400">(path to private key file)</span></label>
+          <input type="text" id="cfg-ssh-key" placeholder="e.g. ~/.ssh/id_rsa">
         </div>
       </div>
 
@@ -792,21 +812,17 @@
       <!-- DB hosts row (baseline / target) -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
-          <label>Baseline DB Host <span style="color:#334155;font-weight:400">(via tunnel)</span></label>
+          <label>Baseline DB Host <span style="color:var(--text-dim);font-weight:400">(via tunnel)</span></label>
           <input type="text" id="cfg-db-host">
         </div>
         <div>
-          <label>Target DB Host <span style="color:#334155;font-weight:400">(via tunnel)</span></label>
+          <label>Target DB Host <span style="color:var(--text-dim);font-weight:400">(via tunnel)</span></label>
           <input type="text" id="cfg-db-host-b">
         </div>
       </div>
 
       <!-- DB shared row -->
-      <div style="display:grid;grid-template-columns:100px 1fr 1fr;gap:12px;margin-bottom:12px">
-        <div>
-          <label>DB Port</label>
-          <input type="number" id="cfg-db-port">
-        </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>Database Name</label>
           <input type="text" id="cfg-db-name">
@@ -816,10 +832,21 @@
           <input type="text" id="cfg-db-table">
         </div>
       </div>
+      <!-- DB passwords (baseline / target) -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
         <div>
-          <label>Username</label>
-          <input type="text" id="cfg-db-user">
+          <label>DB Password (baseline)</label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-db-pass" placeholder="Enter password" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-db-pass-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-db-pass','cfg-db-pass-toggle')">👁 Show</button>
+          </div>
+        </div>
+        <div>
+          <label>DB Password (target)</label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-db-pass-b" placeholder="Enter password" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-db-pass-b-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-db-pass-b','cfg-db-pass-b-toggle')">👁 Show</button>
+          </div>
         </div>
       </div>
 
@@ -827,7 +854,7 @@
       <div style="border-top:1px solid #1e2a3a;margin:4px 0 14px"></div>
 
       <!-- Notification Patterns -->
-      <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:10px;letter-spacing:.4px">NOTIFICATION PATTERNS <span style="font-weight:400;color:#334155">— at least one required, one per line: Label = pattern</span></div>
+      <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:10px;letter-spacing:.4px">NOTIFICATION PATTERNS <span style="font-weight:400;color:var(--text-dim)">— at least one required, one per line: Label = pattern</span></div>
       <textarea id="cfg-patterns" rows="8" class="mono-textarea" placeholder="PUT = put_information&#10;PICK = order_information&#10;Create Move Task = create-move-task-platform-events"></textarea>
       <div id="cfg-pattern-error" style="color:#fca5a5;font-size:12px;margin-top:4px;display:none">⚠️ At least one pattern must be set</div>
       <datalist id="cfg-patterns-datalist"></datalist>
@@ -837,7 +864,11 @@
         <button type="button" class="btn btn-primary" onclick="saveConfig()" id="cfg-save-btn" style="background:#1e3a5f;color:#93c5fd;border:1px solid #2a4a6f">💾 Save</button>
         <button type="button" class="btn btn-ghost" onclick="testConnection(false)" id="cfg-test-btn">🔌 Test Baseline</button>
         <button type="button" class="btn btn-ghost" onclick="testConnection(true)" id="cfg-test-btn-b">🔌 Test Target</button>
+        <button type="button" class="btn btn-ghost" onclick="exportDbConfig()">⬇ Export DB Config</button>
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('cfg-db-import-file').click()">⬆ Import DB Config</button>
+        <input type="file" id="cfg-db-import-file" accept="application/json" style="display:none" onchange="importDbConfig(event)">
         <span id="cfg-status" style="font-size:12px;margin-left:4px"></span>
+        <span id="cfg-db-import-status" style="font-size:12px"></span>
       </div>
     </div>
 
@@ -845,17 +876,24 @@
     <div class="card" style="border-color:#2d1a4f">
       <div class="card-title" style="color:#c4b5fd;justify-content:space-between">
         <span>🧬 Kowl / Kafka Topics</span>
-        <span style="font-size:11px;font-weight:400;color:#3d2a5f;letter-spacing:.3px">TOPIC COMPARE</span>
+        <span style="font-size:11px;font-weight:400;color:var(--text-dim);letter-spacing:.3px">TOPIC COMPARE</span>
+      </div>
+
+      <!-- Kowl's own project — independent of the DB/SSH project above -->
+      <div style="margin-bottom:14px">
+        <label>Kowl Project <span style="color:var(--log-fail);font-weight:700" title="Required">*</span> <span style="color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0">— independent of the DB project; Kowl golden data is grouped under this name</span></label>
+        <input type="text" id="cfg-project-kowl" placeholder="e.g. SBSCloud_2026" list="cfg-project-list">
+        <p style="font-size:11px;color:var(--text-dim);margin-top:5px">Stored under <code style="color:#4ade80">golden/{kowl_project}/kowl/…</code></p>
       </div>
 
       <!-- Hosts row -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
-          <label>Baseline host <span style="color:#4a3a6a;font-weight:400">(capture env)</span></label>
+          <label>Baseline host <span style="color:var(--text-dim);font-weight:400">(capture env)</span></label>
           <input type="text" id="cfg-topic-host" placeholder="https://kowl.example.com">
         </div>
         <div>
-          <label>Target host <span style="color:#4a3a6a;font-weight:400">(compare env)</span></label>
+          <label>Target host <span style="color:var(--text-dim);font-weight:400">(compare env)</span></label>
           <input type="text" id="cfg-topic-host-b" placeholder="https://kowl.example.com">
         </div>
       </div>
@@ -863,11 +901,11 @@
       <!-- Prefixes row -->
       <div style="display:grid;grid-template-columns:1fr 1fr 160px;gap:12px;margin-bottom:14px">
         <div>
-          <label>Baseline env prefix <span style="color:#4a3a6a;font-weight:400">(e.g. aph)</span></label>
+          <label>Baseline env prefix <span style="color:var(--text-dim);font-weight:400">(e.g. aph)</span></label>
           <input type="text" id="cfg-topic-prefix" placeholder="aph">
         </div>
         <div>
-          <label>Target env prefix <span style="color:#4a3a6a;font-weight:400">(e.g. stpfunction-apotekreg)</span></label>
+          <label>Target env prefix <span style="color:var(--text-dim);font-weight:400">(e.g. stpfunction-apotekreg)</span></label>
           <input type="text" id="cfg-topic-prefix-b" placeholder="stpfunction-apotekreg">
         </div>
         <div>
@@ -878,37 +916,24 @@
 
       <!-- Topics textarea (drag the bottom-right corner to resize) -->
       <label style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
-        <span>Topics <span style="color:#4a3a6a;font-weight:400">— one per line, format: <code style="color:#a78bfa">LABEL = topic-suffix</code></span></span>
-        <span id="cfg-topics-count" style="font-size:11px;color:#4a3a6a;font-weight:400"></span>
+        <span>Topics <span style="color:var(--text-dim);font-weight:400">— one per line, format: <code style="color:#a78bfa">LABEL = topic-suffix</code></span></span>
+        <span id="cfg-topics-count" style="font-size:11px;color:var(--text-dim);font-weight:400"></span>
       </label>
       <textarea id="cfg-topics" rows="5" class="mono-textarea" placeholder="Item Create = item-create.requests&#10;Item Response = item-create.responses" style="min-height:110px" oninput="updateTopicsCount()"></textarea>
 
       <!-- Kowl actions -->
-      <div style="display:flex;gap:10px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid #2d1a4f">
+      <div style="display:flex;gap:10px;align-items:center;margin-top:18px;padding-top:16px;border-top:1px solid #2d1a4f;flex-wrap:wrap">
         <button type="button" class="btn btn-primary" onclick="saveKowlConfig()" id="cfg-kowl-save-btn" style="background:#2d1a4f;color:#c4b5fd;border:1px solid #4a2a7f">💾 Save</button>
-        <button type="button" class="btn btn-ghost" onclick="testKowlConnection()" id="cfg-kowl-test-btn">🔌 Test Connection</button>
+        <button type="button" class="btn btn-ghost" onclick="testKowlConnection(false)" id="cfg-kowl-test-btn">🔌 Test Baseline</button>
+        <button type="button" class="btn btn-ghost" onclick="testKowlConnection(true)" id="cfg-kowl-test-btn-b">🔌 Test Target</button>
+        <button type="button" class="btn btn-ghost" onclick="exportKowlConfig()">⬇ Export Kowl Config</button>
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('cfg-kowl-import-file').click()">⬆ Import Kowl Config</button>
+        <input type="file" id="cfg-kowl-import-file" accept="application/json" style="display:none" onchange="importKowlConfig(event)">
         <span id="cfg-kowl-status" style="font-size:12px;margin-left:4px"></span>
+        <span id="cfg-kowl-import-status" style="font-size:12px"></span>
       </div>
     </div>
 
-    <!-- ── Project & Defaults ──────────────────────────────────────────── -->
-    <div class="card" style="border-color:#1a2a1a">
-      <div class="card-title" style="color:#86efac;justify-content:space-between">
-        <span>📁 Project &amp; Defaults</span><button type="button" class="btn btn-primary" onclick="saveProjectDefaults()" id="cfg-project-save-btn" style="font-size:12px;padding:6px 14px">💾 Save</button>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 160px;gap:12px">
-        <div>
-          <label>Current project <span style="color:var(--log-fail);font-weight:700" title="Required">*</span> <span style="color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0">— golden data is grouped under this name</span></label>
-          <input type="text" id="cfg-project" placeholder="e.g. SBSCloud_2026" list="cfg-project-list" required>
-          <datalist id="cfg-project-list"></datalist>
-          <p style="font-size:11px;color:#334155;margin-top:5px">Stored under <code style="color:#4ade80">golden/{project}/…</code></p>
-        </div>
-        <div>
-          <label>Poll interval (s)</label>
-          <input type="number" id="cfg-poll">
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- GOLDENS -->

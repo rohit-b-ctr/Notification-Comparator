@@ -8,8 +8,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.config import *
+from core.diffing import fail_count
 
 ALLURE_DIR = BASE_DIR / "allure-results"
+
+def _findings_summary(findings):
+    if not findings:
+        return "matches golden"
+    nfail = fail_count(findings)
+    nwarn = len(findings) - nfail
+    parts = []
+    if nfail: parts.append(f"{nfail} difference(s)")
+    if nwarn: parts.append(f"{nwarn} warning(s)")
+    return ", ".join(parts)
 
 ALLURE_STATUS = {
     "PASS": "passed", "FAIL": "failed",
@@ -49,7 +60,7 @@ def build_allure_results(results, meta, start_ms, stop_ms):
             "fullName": f"{flow}.{key}",
             "status": ALLURE_STATUS.get(r.get("status"), "unknown"),
             "statusDetails": {
-                "message": f"{len(findings)} difference(s)" if findings else "matches golden",
+                "message": _findings_summary(findings),
                 "trace": trace,
             },
             "stage": "finished",

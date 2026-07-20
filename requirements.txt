@@ -8,6 +8,7 @@ websocket-client~=1.9
 PyMuPDF~=1.26
 xmltodict~=1.0
 requests~=2.31          # used for Kowl REST API fetches
+cryptography~=48.0      # encrypts secrets (DB pass, SSH key) at rest in config.json
 
 # Optional (NOT a pip package) — for Allure HTML report generation in Full Run:
 #   brew install allure   (needs a JRE)   OR   npm i -g allure-commandline

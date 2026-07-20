@@ -3,6 +3,7 @@
 Also hosts XML parsing for the XML comparator (xmltodict -> dict -> DeepDiff).
 """
 import json
+import re
 
 from deepdiff import DeepDiff  # type: ignore[import]
 
@@ -32,6 +33,25 @@ def strip_dynamic(obj):
     elif isinstance(obj, list):
         return [strip_dynamic(i) for i in obj]
     return obj
+
+def deepdiff_path_to_dot(path):
+    """DeepDiff's "root['a']['b'][0]" -> dot notation "a.b.0"."""
+    segs = re.findall(r"\[['\"]?[^\]'\"]+['\"]?\]", path or "")
+    return ".".join(seg.strip("[]'\"") for seg in segs)
+
+def flatten_dict(obj, prefix=""):
+    """Flatten a nested dict/list into {dot.path: leaf_value} — used to render
+    a full field-by-field side-by-side view (not just the differences)."""
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(flatten_dict(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            out.update(flatten_dict(v, f"{prefix}.{i}" if prefix else str(i)))
+    else:
+        out[prefix] = obj
+    return out
 
 def clean_payload(raw):
     data = json.loads(raw) if isinstance(raw, str) else raw
@@ -76,12 +96,66 @@ def diff_to_list(diff, mode="full"):
                 out.append({"type": label, "path": str(path), "detail": detail})
         elif change_type in ("values_changed", "type_changes"):
             for path, info in changes.items():
-                if change_type == "values_changed":
-                    detail = f"{info['old_value']!r} → {info['new_value']!r}"
-                else:
-                    detail = f"{type(info['old_value']).__name__} → {type(info['new_value']).__name__}"
+                old_t, new_t = type(info['old_value']).__name__, type(info['new_value']).__name__
+                # Always show both the value and its type — makes it obvious at a
+                # glance whether this is a plain value drift (same type) or an
+                # actual type mismatch (e.g. str -> int) hiding inside the values.
+                detail = f"{info['old_value']!r} ({old_t}) → {info['new_value']!r} ({new_t})"
                 out.append({"type": change_type.replace("_", " "), "path": str(path), "detail": detail})
     return out
+
+# Finding types that indicate a real schema break — a field appeared/disappeared,
+# or the same field changed data type (e.g. string -> int). These fail a compare.
+# A plain "values changed" finding (same field, same type, different value — think
+# a changing counter, a regenerated id, a timestamp) doesn't fail the compare —
+# it's expected data drift, not a broken schema — but it's still surfaced as a
+# yellow "warning" finding in the UI/report so it isn't silently invisible.
+FAIL_FINDING_TYPES = {"type changes", "Missing Field", "Extra Field"}
+
+def fail_count(findings):
+    """How many findings are real schema breaks — excludes value-only warnings,
+    so log/summary lines don't count a value drift as a 'diff'."""
+    return sum(1 for f in (findings or []) if f.get("type") in FAIL_FINDING_TYPES)
+
+def status_from_findings(findings):
+    """PASS / FAIL verdict for a list of diff findings. A compare with only
+    value-only warnings (no schema break) still passes overall."""
+    if any(f.get("type") in FAIL_FINDING_TYPES for f in (findings or [])):
+        return "FAIL"
+    return "PASS"
+
+def side_by_side_fields(golden, actual):
+    """Full field-by-field baseline-vs-target view (unlike diff_to_list, this
+    includes matching fields too, not just the differences) — used to render
+    a side-by-side compare table. Each row's status:
+      'same' — identical value
+      'warn' — differs, but not a schema break (value-only drift, or a field
+               that's in IGNORE_FIELDS and expected to always differ)
+      'fail' — differs in a way that fails the compare (missing/extra key,
+               type change) and isn't an ignored field
+    """
+    g_full = normalize(golden)
+    a_full = normalize(actual)
+    full_findings = diff_to_list(DeepDiff(g_full, a_full, ignore_order=True, verbose_level=2))
+
+    status_by_path = {}
+    for f in full_findings:
+        dp  = deepdiff_path_to_dot(f["path"])
+        top = dp.split(".")[0] if dp else ""
+        if top in IGNORE_FIELDS:
+            status_by_path[dp] = "warn"
+        elif f["type"] in FAIL_FINDING_TYPES:
+            status_by_path[dp] = "fail"
+        else:
+            status_by_path[dp] = "warn"
+
+    b_flat = flatten_dict(g_full)
+    t_flat = flatten_dict(a_full)
+    return [
+        {"path": p, "baseline": b_flat.get(p), "target": t_flat.get(p),
+         "status": status_by_path.get(p, "same")}
+        for p in sorted(set(b_flat) | set(t_flat))
+    ]
 
 def xml_to_obj(text):
     """Parse an XML document into a plain dict so it can flow through the same

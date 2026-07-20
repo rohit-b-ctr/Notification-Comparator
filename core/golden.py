@@ -11,9 +11,19 @@ from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscr
 def current_project():
     return (load_config().get("project") or "").strip()
 
-def golden_root():
-    """Root dir for goldens — golden/{project} when a project is set, else golden/."""
-    proj = current_project()
+def current_kowl_project():
+    """Kowl's own project name — independent of the DB/ISD "project", so Kowl
+    baselines can live under a different golden/{kowl_project}/ root."""
+    return (load_config().get("kowl_project") or "").strip()
+
+def golden_root(source=None, project_kind=None):
+    """Root dir for goldens — golden/{project} when a project is set, else golden/.
+    project_kind explicitly picks "db" or "kowl" as the project bucket; if
+    omitted, it's inferred from source (source="kowl" -> kowl project, else
+    the DB/ISD project). ISD goldens captured for the Kowl world pass
+    project_kind="kowl" explicitly since their source is "isd", not "kowl"."""
+    kind = project_kind or ("kowl" if source == "kowl" else "db")
+    proj = current_kowl_project() if kind == "kowl" else current_project()
     return (GOLDEN_DIR / proj) if proj else GOLDEN_DIR
 
 # Capture sources — golden data is filed under golden/{project}/{source}/{FLOW}/...
@@ -39,7 +49,7 @@ def _safe_folder_path(label):
     parts = [_safe_folder(p) for p in label.split("/") if p.strip()]
     return "/".join(parts) if parts else "OTHER"
 
-def golden_path(key, source="db", label=None):
+def golden_path(key, source="db", label=None, project_kind=None):
     """Write path: golden/{project}/{source}/{FOLDER}/{key}.json
 
     FOLDER is the configured pattern label when given (so e.g. a
@@ -48,16 +58,18 @@ def golden_path(key, source="db", label=None):
     happens to carry, like PUT) — otherwise falls back to the legacy
     behaviour of deriving the folder from the key's type prefix. `label` may
     contain '/' for nested folders (e.g. topic label + message name).
+    project_kind: see golden_root() — lets ISD goldens explicitly file under
+    the Kowl project instead of the DB/ISD project.
     """
     flow_type = _safe_folder_path(label) if label else key.split("__")[0].upper()
-    return golden_root() / source / flow_type / f"{key}.json"
+    return golden_root(source, project_kind) / source / flow_type / f"{key}.json"
 
-def save_golden(key, payload, source="db", label=None):
-    path = golden_path(key, source, label=label)
+def save_golden(key, payload, source="db", label=None, project_kind=None):
+    path = golden_path(key, source, label=label, project_kind=project_kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str))
 
-def load_golden(key, source=None, label=None):
+def load_golden(key, source=None, label=None, project_kind=None):
     """
     Find a golden by key.
     - source given  -> look ONLY in that source (golden/{project}/{source}/...).
@@ -66,24 +78,25 @@ def load_golden(key, source=None, label=None):
                        then fall back to the legacy type-derived folder so
                        goldens captured before pattern-based labeling still
                        resolve.
+    - project_kind  -> see golden_root(); forces "db" or "kowl" regardless of source.
     """
     flow_type = key.split("__")[0].upper()
     label_folder = _safe_folder_path(label) if label else None
     if source:
         candidates = []
         if label_folder:
-            candidates.append(golden_root() / source / label_folder / f"{key}.json")
+            candidates.append(golden_root(source, project_kind) / source / label_folder / f"{key}.json")
         candidates += [
-            golden_root() / source / flow_type / f"{key}.json",
-            golden_root() / source / f"{key}.json",
+            golden_root(source, project_kind) / source / flow_type / f"{key}.json",
+            golden_root(source, project_kind) / source / f"{key}.json",
         ]
     else:
         candidates = []
         for s in GOLDEN_SOURCES:
             if label_folder:
-                candidates.append(golden_root() / s / label_folder / f"{key}.json")
-            candidates.append(golden_root() / s / flow_type / f"{key}.json")
-            candidates.append(golden_root() / s / f"{key}.json")
+                candidates.append(golden_root(s) / s / label_folder / f"{key}.json")
+            candidates.append(golden_root(s) / s / flow_type / f"{key}.json")
+            candidates.append(golden_root(s) / s / f"{key}.json")
         candidates += [
             golden_root() / flow_type / f"{key}.json",   # legacy golden/{project}/{FLOW}/{key}.json
             golden_root() / f"{key}.json",               # legacy golden/{project}/{key}.json
@@ -114,6 +127,32 @@ def list_projects():
             projects.append(p.name)
     return projects
 
+# ─── SUBSCRIBER SNAPSHOTS (per-pattern subscriber row, baseline vs target) ────
+# Stored under golden/{project}/subscriber/{label}.json — a sibling of the
+# db/isd/kowl notification sources, but not one of them: it snapshots the
+# subscriber table row itself (per configured pattern), not a notification
+# payload, so it gets its own top-level folder rather than joining GOLDEN_SOURCES.
+
+def subscriber_golden_path(label):
+    return golden_root() / "subscriber" / f"{_safe_folder_path(label)}.json"
+
+def save_subscriber_golden(label, data):
+    path = subscriber_golden_path(label)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, default=str))
+
+def load_subscriber_golden(label):
+    path = subscriber_golden_path(label)
+    if path.exists():
+        return json.loads(path.read_text())
+    return None
+
+def list_subscriber_goldens():
+    root = golden_root() / "subscriber"
+    if not root.exists():
+        return []
+    return sorted(str(p.relative_to(root).with_suffix("")) for p in root.rglob("*.json"))
+
 def extract_ext_id(raw_payload):
     """Extract externalServiceRequestId before stripping — used for grouping only."""
     try:
@@ -123,6 +162,25 @@ def extract_ext_id(raw_payload):
         return nd.get("externalServiceRequestId", "")
     except Exception:
         return ""
+
+def dedupe_by_key(results):
+    """Collapse results down to one per (flow, notification key), keeping the
+    first occurrence — mirrors Full Run's live dedup (core/live.py) so Compare
+    doesn't flood the table with N identical-looking rows every time the same
+    key (e.g. PICK__inventory_awaited__PAUSED) recurs across many requests.
+    Returns (deduped_results, skipped_count).
+    """
+    seen = set()
+    deduped = []
+    skipped = 0
+    for r in results:
+        dedup_key = (r.get("flow"), r.get("key"))
+        if dedup_key in seen:
+            skipped += 1
+            continue
+        seen.add(dedup_key)
+        deduped.append(r)
+    return deduped, skipped
 
 def process_rows(rows, mode="full", source=None, label=None):
     results = []
@@ -141,7 +199,7 @@ def process_rows(rows, mode="full", source=None, label=None):
                 findings = diff_to_list(diff, mode=mode)
                 results.append({"db_id": row["id"], "create_time": str(row["create_time"]),
                                  "key": key, "ext_id": ext_id,
-                                 "status": "PASS" if not findings else "FAIL",
+                                 "status": status_from_findings(findings),
                                  "findings": findings,
                                  "payload": payload})
         except Exception as e:

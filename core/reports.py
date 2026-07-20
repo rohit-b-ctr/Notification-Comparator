@@ -70,7 +70,8 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
         st = r["status"]
         color = {"PASS": "#16a34a", "FAIL": "#dc2626"}.get(st, "#b45309")
         findings = "".join(
-            f'<div style="color:#b91c1c;font-family:monospace;font-size:12px;padding:2px 0">'
+            f'<div style="color:{"#b45309" if f["type"] == "values changed" else "#b91c1c"};'
+            f'font-family:monospace;font-size:12px;padding:2px 0">'
             f'<b>{esc(f["type"])}</b> {esc(f["path"])} {esc(f.get("detail",""))}</div>'
             for f in r.get("findings", [])
         ) or '<div style="color:#16a34a;font-size:12px">✓ matches golden</div>'
@@ -207,6 +208,98 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
   </script>
 </body></html>"""
 
+def build_subscriber_report(results, title="Subscriber Compare Report", meta=None):
+    """Self-contained HTML report for subscriber snapshot compares — one
+    collapsible row per pattern, expanding to a full baseline-vs-target
+    side-by-side field table (matching fields shown too, not just diffs)."""
+    meta = meta or {}
+    total = len(results)
+    npass = sum(1 for r in results if r["status"] == "PASS")
+    nfail = sum(1 for r in results if r["status"] == "FAIL")
+    nother = total - npass - nfail
+
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    FIELD_COLOR = {"same": "#0f172a", "warn": "#b45309", "fail": "#b91c1c"}
+
+    rows = []
+    for i, r in enumerate(results):
+        st = r["status"]
+        color = {"PASS": "#16a34a", "FAIL": "#dc2626"}.get(st, "#b45309")
+        fields = r.get("fields") or []
+        if fields:
+            field_rows = "".join(
+                f'<tr style="border-bottom:1px solid #f1f5f9">'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:11px;color:#64748b">{esc(f["path"])}</td>'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]}">{esc(f["baseline"])}</td>'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]}">{esc(f["target"])}</td>'
+                f'</tr>'
+                for f in fields
+            )
+            detail = (
+                '<table style="width:100%;border-collapse:collapse;margin-top:4px">'
+                '<thead><tr style="background:#f8fafc;text-align:left">'
+                '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">FIELD</th>'
+                '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">BASELINE</th>'
+                '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">TARGET</th>'
+                '</tr></thead><tbody>' + field_rows + '</tbody></table>'
+            )
+        else:
+            detail = "".join(
+                f'<div style="color:{"#b45309" if f["type"] == "values changed" else "#b91c1c"};'
+                f'font-family:monospace;font-size:12px;padding:2px 0">'
+                f'<b>{esc(f["type"])}</b> {esc(f["path"])} {esc(f.get("detail",""))}</div>'
+                for f in r.get("findings", [])
+            ) or '<div style="color:#16a34a;font-size:12px">✓ matches golden</div>'
+        rid = f"row{i}"
+        rows.append(f"""
+        <tr class="notif-row" data-status="{esc(st)}" onclick="toggleNotif('{rid}')" style="border-bottom:1px solid #e5e7eb;cursor:pointer">
+          <td style="padding:8px;font-size:11px;color:#94a3b8;width:18px" id="{rid}-arrow">▸</td>
+          <td style="padding:8px;font-size:12px"><b>{esc(r.get('label',''))}</b></td>
+          <td style="padding:8px;font-family:monospace;font-size:12px">{esc(r.get('pattern',''))}</td>
+          <td style="padding:8px"><b style="color:{color}">{esc(st)}</b></td>
+          <td style="padding:8px;font-size:11px;color:#94a3b8">{len(r.get('findings', []))} finding(s)</td>
+        </tr>
+        <tr class="notif-detail" data-status="{esc(st)}" id="{rid}-detail" style="display:none;border-bottom:1px solid #e5e7eb">
+          <td></td>
+          <td colspan="4" style="padding:0 8px 12px">{detail}</td>
+        </tr>""")
+
+    meta_rows = "".join(
+        f'<span style="margin-right:18px"><b>{esc(k)}:</b> {esc(v)}</span>' for k, v in meta.items()
+    )
+
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>{esc(title)}</title></head>
+<body style="font-family:-apple-system,Segoe UI,sans-serif;background:#f8fafc;color:#0f172a;margin:0;padding:28px">
+  <h1 style="font-size:20px;margin:0 0 4px">{esc(title)}</h1>
+  <div style="font-size:12px;color:#64748b;margin-bottom:16px">{meta_rows}</div>
+  <div style="display:flex;gap:12px;margin-bottom:20px">
+    <div style="flex:1;background:#fff;border:2px solid #0f172a;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700">{total}</div><div style="font-size:11px;color:#64748b">TOTAL</div></div>
+    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
+    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
+    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
+  </div>
+  <div style="font-size:11px;color:#64748b;margin-bottom:10px">
+    <span style="color:#0f172a">■</span> same &nbsp;
+    <span style="color:#b45309">■</span> differs (warning — expected drift, doesn't fail) &nbsp;
+    <span style="color:#b91c1c">■</span> differs (schema break — fails)
+  </div>
+  <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+    <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">LABEL</th><th style="padding:8px;font-size:11px;color:#64748b">PATTERN</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <script>
+    function toggleNotif(rid) {{
+      var detail = document.getElementById(rid + '-detail');
+      var arrow  = document.getElementById(rid + '-arrow');
+      var open   = detail.style.display === 'table-row';
+      detail.style.display = open ? 'none' : 'table-row';
+      arrow.textContent = open ? '▸' : '▾';
+    }}
+  </script>
+</body></html>"""
+
 def save_report(html, prefix="report"):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"{prefix}_{ts}.html"
@@ -214,9 +307,14 @@ def save_report(html, prefix="report"):
     return name
 
 def save_report_meta(report_name, results, project="", mode="full", per_flow=None,
-                     created=None, kind="run", allure_zip=None, allure_html=None):
+                     created=None, kind="run", allure_zip=None, allure_html=None, items=None):
     """Write a sidecar so the dashboard list can show project/time/pass-fail
-    (and persistent Allure links) without opening each HTML report."""
+    (and persistent Allure links) without opening each HTML report.
+
+    items — optional list of small per-entry dicts (e.g. {label, pattern, status}
+    for a subscriber compare) shown when the dashboard row is expanded, so the
+    list gives useful detail without opening the full HTML report.
+    """
     total = len(results)
     npass = sum(1 for r in results if r.get("status") == "PASS")
     nfail = sum(1 for r in results if r.get("status") == "FAIL")
@@ -233,6 +331,7 @@ def save_report_meta(report_name, results, project="", mode="full", per_flow=Non
         "per_flow": per_flow or {},
         "allure_zip": allure_zip,
         "allure_html": allure_html,
+        "items": items or [],
     }
     (REPORTS_DIR / f"{report_name}.meta.json").write_text(json.dumps(meta, indent=2))
     return meta

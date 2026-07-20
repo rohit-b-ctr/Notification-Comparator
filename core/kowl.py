@@ -6,7 +6,7 @@ from deepdiff import DeepDiff  # type: ignore[import]
 
 from core.config import *
 from core.diffing import *
-from core.golden import load_golden, save_golden, golden_path, golden_root
+from core.golden import load_golden, save_golden, golden_path, golden_root, dedupe_by_key
 from core.state import kowl_capture_state
 
 # websocket-client is only needed for Kowl topic streaming; keep it optional.
@@ -27,9 +27,29 @@ def strip_fields(obj, fields):
         return [strip_fields(i, fields) for i in obj]
     return obj
 
+def normalize_kowl_envelope(env):
+    """Normalize a Kowl envelope so env['payload'] is ALWAYS the flat
+    notification data. Some messages double-wrap: env['payload'] is itself an
+    ISD-style {notification_type, notification_data} envelope instead of the
+    flat data. Un-nesting this ONCE, here, means every downstream consumer —
+    key derivation (topic_notif_key) AND the actual stored/compared payload
+    (clean_topic_payload) — sees one consistent shape. Doing this in only one
+    of the two previously let a baseline captured from a flat-shaped message
+    and a live double-wrapped message of the same notification match by key
+    but still report spurious Missing/Extra Field diffs from the leftover
+    wrapper layer."""
+    if not isinstance(env, dict):
+        return env
+    inner = env.get("payload")
+    if isinstance(inner, dict):
+        nd = inner.get("notification_data")
+        if isinstance(nd, dict):
+            return {**env, "payload": nd}
+    return env
+
 def clean_topic_payload(env):
     """env = the message's value.payload envelope from Kowl."""
-    return strip_fields(normalize(env), TOPIC_IGNORE_FIELDS)
+    return strip_fields(normalize(normalize_kowl_envelope(env)), TOPIC_IGNORE_FIELDS)
 
 def apply_prefix(topics, prefix):
     """Prepend env prefix to each topic's name if a prefix is configured.
@@ -113,19 +133,46 @@ def payload_type_signature(env):
     return ""
 
 def topic_notif_key(env, label, topic):
-    """Pairing key across setups: {LABEL}__{name}__{state}[__{type}][__{sr_type_path}]."""
+    """Pairing key across setups: {LABEL}__{name}__{state}[__{type}][__{sr_type_path}].
+
+    normalize_kowl_envelope() handles the double-wrap case (value.payload.payload
+    itself being an ISD-style {notification_type, notification_data} envelope) —
+    applied here too (not just in clean_topic_payload) so the key always matches
+    what the stored/compared payload actually looks like.
+    """
+    env   = normalize_kowl_envelope(env)
     name  = env.get("name") or topic_short(topic)
-    inner = env.get("payload") if isinstance(env.get("payload"), dict) else {}
+    # Some callers pass the flat notification data itself as `env` (no
+    # "payload" wrapper at all) — fall back to treating env as its own inner
+    # data in that case.
+    inner = env.get("payload") if isinstance(env.get("payload"), dict) else env
     state = (inner.get("state") or env.get("state")
              or inner.get("status") or env.get("status") or "all")
     key = f"{label}__{name}__{str(state).strip().lower()}"
-    type_sig = payload_type_signature(env)
+    type_sig = payload_type_signature({"payload": inner})
     if type_sig:
         key += f"__{type_sig}"
-    sr_path = sr_type_path(env)
+    sr_path = sr_type_path({"payload": inner})
     if sr_path:
         key += f"__{sr_path}"
     return key
+
+def as_kowl_envelope(o):
+    """Detect & unwrap a raw Kowl message (or its value.payload envelope)
+    pasted directly into 'paste as golden', so it can be keyed properly
+    instead of falling through to the ISD-shape parser and degenerating to a
+    generic 'NOTIFICATION' key. Accepts either the full Kowl message
+    ({"value": {"payload": {...}}, "partitionID": ..., ...}) or just the inner
+    envelope itself ({"name": ..., "payload": {...}}). Returns None if `o`
+    doesn't look like either shape."""
+    if not isinstance(o, dict):
+        return None
+    env = message_envelope(o)
+    if isinstance(env, dict):
+        return env
+    if isinstance(o.get("name"), str) and isinstance(o.get("payload"), dict):
+        return o
+    return None
 
 def _normalise_host(host):
     """Return (http_base_url, ws_url_base, is_tls) from a host string that may or may not have a scheme."""
@@ -271,7 +318,7 @@ def list_topic_baselines():
     '/' folder separators) re-derives a bogus, wrong-nested folder and view/
     delete requests 404 even though the file exists right where it was saved.
     """
-    root = golden_root() / "kowl"
+    root = golden_root(source="kowl") / "kowl"
     seen, keys = set(), []
     if root.exists():
         for p in root.rglob("*.json"):
@@ -418,14 +465,18 @@ def compare_kowl_env(env, label, topic, mode, golden_source, row_id):
         nd      = kowl_notification_data(env)
         payload = clean_payload(nd)
         key     = notif_key(payload)
-        golden  = load_golden(key, source=golden_source)
+        # ISD goldens captured for the Kowl world live under the independent
+        # kowl_project (see capture_isd_goldens' project_kind option) — this
+        # compare is itself always Kowl-live-data-driven, so look there.
+        project_kind = "kowl" if golden_source == "isd" else None
+        golden  = load_golden(key, source=golden_source, project_kind=project_kind)
     base = {"db_id": row_id, "create_time": topic_short(topic), "key": key,
             "ext_id": ext_id, "flow": label}
     if golden is None:
         return {**base, "status": "NO GOLDEN", "findings": [], "payload": payload}
     diff = DeepDiff(golden, payload, ignore_order=True, verbose_level=2)
     findings = diff_to_list(diff, mode=mode)
-    return {**base, "status": "PASS" if not findings else "FAIL",
+    return {**base, "status": status_from_findings(findings),
             "findings": findings, "payload": payload}
 
 _FETCH_TIMEOUT = 25  # seconds — outer wall-clock limit; must stay > fetch_topic_messages'
@@ -506,6 +557,14 @@ def compare_topics(host, topics, count, mode="full", golden_source="kowl", state
             if log:
                 log.put({"type": "topic_error", "topic": topic, "current": i, "total": total,
                          "msg": f"[{i}/{total}] ✗ {topic}: {e}"})
+
+    # Multiple raw messages in the fetched window often resolve to the same
+    # notification key (e.g. several PICK_LINE creates in a row) — collapse to
+    # one row per (flow, key), same as the DB/Full Run compare, so the table
+    # doesn't show N duplicate-looking rows for what is really one flow's result.
+    results, skipped_repeats = dedupe_by_key(results)
+    if log and skipped_repeats:
+        log.put({"type": "ok", "msg": f"Collapsed {skipped_repeats} repeat-key message(s) into their first occurrence."})
     return results
 
 def kowl_watch_loop(state, interval):
@@ -524,6 +583,10 @@ def kowl_watch_loop(state, interval):
     if not topics:
         log.put({"type": "error", "msg": "No topics configured (Config tab)."}); return
     seen = set()
+    # Dedup by (label, key): once a topic's notification key has been compared
+    # once, later messages with the same key get the same schema verdict —
+    # skip re-comparing/re-logging them instead of flooding the log.
+    seen_keys = {}
     primed = False   # first sweep baselines existing messages; only newer ones are compared
     try:
         while state["running"]:
@@ -547,10 +610,18 @@ def kowl_watch_loop(state, interval):
                             continue   # pre-existing message at start — ignore
                         r = compare_kowl_env(env, label, topic, mode, gsource,
                                              f"p{msg.get('partitionID','?')}@{msg.get('offset','?')}")
+                        dedup_key = (label, r["key"])
+                        if dedup_key in seen_keys:
+                            seen_keys[dedup_key] += 1
+                            continue
+                        seen_keys[dedup_key] = 1
                         state["results"].append(r)
                         icon = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
+                        nfail = fail_count(r["findings"])
+                        nwarn = len(r["findings"]) - nfail
+                        counts = f"{nfail} diff(s)" + (f", {nwarn} warning(s)" if nwarn else "")
                         log.put({"type": r["status"].lower().replace(" ", "_"),
-                                 "msg": f"{icon} {label} {r['key']} — {len(r['findings'])} diff(s)",
+                                 "msg": f"{icon} {label} {r['key']} — {counts}",
                                  "result": r})
                 except Exception as e:
                     log.put({"type": "error", "msg": f"✗ [{i}/{len(topics)}] {topic}: {e}"})

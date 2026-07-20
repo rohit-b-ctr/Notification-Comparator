@@ -1,10 +1,10 @@
 """Background worker threads: live capture, watch, and full-run compare."""
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 from core.config import *
 from core.diffing import *
-from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscriber_ids
+from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscriber_ids, db_now
 from core.golden import process_rows, run_all_db_flows, current_project, save_golden, label_for_pattern
 from core.kowl import kowl_watch_loop
 from core.reports import build_html_report, save_report, save_report_meta
@@ -16,13 +16,13 @@ def capture_live_thread(patterns, interval, ext_id=None):
         patterns = [patterns]
     cfg = get_cfg()
     log = capture_state["log_queue"]
-    since = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         log.put({"type": "info", "msg": f"Opening SSH tunnel to {cfg['ssh_host']}..."})
         tunnel = open_tunnel(cfg)
         conn   = connect_db(tunnel, cfg)
         cur    = conn.cursor()
+        since  = db_now(cur)  # DB's own clock — see db_now() for why this matters
         # Map subscriber_id -> configured pattern label, so a golden is filed
         # under the pattern's own label folder rather than whatever internal
         # "type" field happens to be in the payload (e.g. a
@@ -84,7 +84,11 @@ def watch_thread_fn(pattern, interval):
             watch_state["running"] = False
         return
     seen = set()
-    since = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Once a notification key (type/state/status) has been compared once in this
+    # run, every later message with the identical key gets the same schema
+    # verdict — so skip re-comparing/re-logging it and just tally how many were
+    # skipped, instead of flooding the log with the same diff over and over.
+    seen_keys = {}
     log = watch_state["log_queue"]
 
     try:
@@ -93,6 +97,7 @@ def watch_thread_fn(pattern, interval):
         tunnel = open_tunnel(cfg, target=True)
         conn = connect_db(tunnel, cfg, target=True)
         cur = conn.cursor()
+        since = db_now(cur)  # DB's own clock — see db_now() for why this matters
         sub_ids = resolve_subscriber_ids(cur, [pattern])
         if not sub_ids:
             log.put({"type": "error", "msg": f"No subscriber found for pattern '{pattern}'."})
@@ -113,16 +118,26 @@ def watch_thread_fn(pattern, interval):
                 results = process_rows([row], mode=watch_state.get("mode", "full"),
                                        source=watch_state.get("source", "db"), label=label)
                 r = results[0]
+                if r["key"] in seen_keys:
+                    seen_keys[r["key"]] += 1
+                    continue
+                seen_keys[r["key"]] = 1
                 watch_state["results"].append(r)
                 icon   = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
                 # NOTE: use a distinct name — do NOT reassign `ext_id`, which is the
                 # query filter for the next poll; clobbering it pins the watch to one flow.
                 row_ext_id = r.get("ext_id", "")
                 ext_str = f" [{row_ext_id}]" if row_ext_id else ""
-                log.put({"type": r["status"].lower().replace(" ", "_"), "msg": f"{icon} [{r['db_id']}]{ext_str} {r['key']} — {len(r['findings'])} diff(s)", "result": r})
+                nfail = fail_count(r["findings"])
+                nwarn = len(r["findings"]) - nfail
+                counts = f"{nfail} diff(s)" + (f", {nwarn} warning(s)" if nwarn else "")
+                log.put({"type": r["status"].lower().replace(" ", "_"), "msg": f"{icon} [{r['db_id']}]{ext_str} {r['key']} — {counts}", "result": r})
             time.sleep(interval)
 
         cur.close(); conn.close(); tunnel.stop()
+        repeats = sum(c - 1 for c in seen_keys.values() if c > 1)
+        if repeats:
+            log.put({"type": "info", "msg": f"({repeats} additional notification(s) with an already-seen key were skipped)"})
         log.put({"type": "done", "msg": "Watch stopped."})
     except Exception as e:
         log.put({"type": "error", "msg": f"Error: {e}"})
@@ -140,8 +155,11 @@ def full_watch_thread_fn(interval):
     On stop, build + save a collective report (+ metadata sidecar)."""
     full_watch_state["results"] = []
     seen = set()
+    # Dedup by (flow, key): once a given flow's notification key has been
+    # compared once, later messages with the same key get the same schema
+    # verdict — skip re-comparing/re-logging them instead of flooding the log.
+    seen_keys = {}
     started = datetime.now()
-    since = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     full_watch_state["started_at"] = started.strftime("%Y-%m-%d %H:%M:%S")
     log = full_watch_state["log_queue"]
     mode = full_watch_state.get("mode", "full")
@@ -157,6 +175,7 @@ def full_watch_thread_fn(interval):
             tunnel = open_tunnel(cfg, target=True)
             conn = connect_db(tunnel, cfg, target=True)
             cur = conn.cursor()
+            since = db_now(cur)  # DB's own clock — see db_now() for why this matters
             # Build subscriber_id -> flow map by resolving each configured pattern.
             sub_to_flow, sub_ids = {}, []
             for entry in cfg.get("patterns", []):
@@ -184,16 +203,27 @@ def full_watch_thread_fn(interval):
                     results = process_rows([row], mode=mode, source=source, label=row_label)
                     r = results[0]
                     r["flow"] = row_label
+                    dedup_key = (row_label, r["key"])
+                    if dedup_key in seen_keys:
+                        seen_keys[dedup_key] += 1
+                        continue
+                    seen_keys[dedup_key] = 1
                     full_watch_state["results"].append(r)
                     icon = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
                     row_ext_id = r.get("ext_id", "")
                     ext_str = f" [{row_ext_id}]" if row_ext_id else ""
+                    nfail = fail_count(r["findings"])
+                    nwarn = len(r["findings"]) - nfail
+                    counts = f"{nfail} diff(s)" + (f", {nwarn} warning(s)" if nwarn else "")
                     log.put({"type": r["status"].lower().replace(" ", "_"),
-                             "msg": f"{icon} {r['flow']} [{r['db_id']}]{ext_str} {r['key']} — {len(r['findings'])} diff(s)",
+                             "msg": f"{icon} {r['flow']} [{r['db_id']}]{ext_str} {r['key']} — {counts}",
                              "result": r})
                 time.sleep(interval)
 
             cur.close(); conn.close(); tunnel.stop()
+            repeats = sum(c - 1 for c in seen_keys.values() if c > 1)
+            if repeats:
+                log.put({"type": "info", "msg": f"({repeats} additional notification(s) with an already-seen key were skipped)"})
 
         # Finalize: build per-flow summary + report.
         results = full_watch_state["results"]
