@@ -11,13 +11,14 @@ A Flask web application that automates WMS notification validation. It captures 
 - **Separate baseline/target DB connections** — capture goldens from one environment (baseline) and compare live traffic from a different one (target); SSH port/user/key and DB name/user/table are shared
 - **Live Watch** — real-time DB polling triggered by you; compare notifications as they land without knowing timestamps in advance
 - **Full Run** — automated end-to-end: watch, capture, and compare in a single flow with Allure report generation
-- **Kafka / Kowl Topic Capture & Compare** — stream messages from Kowl's WebSocket API, save per-topic baselines, and compare target-env topics against them
-- **ISD PDF Extraction** — extract structured JSON from ISD PDF documents and promote them directly to golden snapshots
+- **Kafka / Kowl Topic Capture & Compare** — stream messages from Kowl's WebSocket API, save per-topic baselines, and compare target-env topics against them; repeat messages that resolve to the same notification key are automatically collapsed to one row instead of flooding the results table
+- **ISD PDF Extraction & Paste-as-Golden** — extract structured JSON straight from ISD PDF documents, or paste a payload (an ISD-style notification, a flat notification body, or a raw Kowl message envelope) directly. Either way, each payload is auto-detected and filed as a real `db` or `kowl` golden — the same buckets a live DB/Kowl capture uses, so it's found by the ordinary Compare tab with no separate "ISD" comparison mode. Gap-fill only: an ISD/paste capture never overwrites a golden a real live capture already produced for that key
+- **Subscriber Config Compare** — snapshot each configured pattern's `subscriber` table row from the baseline env, then diff the target env's row against it; shows a full side-by-side (baseline vs. target) field table — matching fields included, not just diffs — with drift on volatile fields (timestamps, IPs, request IDs) surfaced as a non-failing warning rather than a hard failure. Reports for this land in their own collapsible "Subscriber Compare Reports" section on the Dashboard, separate from the main Past Reports list
 - **Direct JSON / XML Compare** — paste two payloads and diff them instantly, no DB or Kafka required
 - **Allure Reports** — every Full Run emits a downloadable `allure-results.zip`; if the Allure CLI is installed, the HTML report is generated in-app automatically
 - **HTML Reports** — lightweight per-run HTML diff reports stored in `reports/`
 - **Dynamic field exclusion** — noisy fields (`id`, `createdOn`, timestamps, etc.) are stripped before diffing to eliminate false positives
-- **Independent DB and Kowl projects** — the DB/ISD project (`project`) and the Kowl project (`kowl_project`) are separate values, each with their own `golden/{project}/...` folder — so DB and Kowl baselines never collide even when captured under different names
+- **Independent DB and Kowl projects** — the DB project (`project`) and the Kowl project (`kowl_project`) are separate values, each with their own `golden/{project}/...` folder — so DB and Kowl baselines never collide even when captured under different names
 - **Split config export/import** — download/restore DB-side config (`db_config-*.json`) and Kowl-side config (`kowl_config-*.json`) independently from their respective Config cards, as a portable backup or to move settings to another machine
 - **Encrypted secrets at rest** — DB passwords (baseline + target) are encrypted with `cryptography`'s Fernet and stored directly in `config.json` (as `db_pass_enc` / `db_pass_b_enc`); the encryption key lives in a local-only `.config_key` file that's never committed. SSH key path is just a file path, not a secret, so it's stored in plain text
 
@@ -82,19 +83,17 @@ Everything below lives in `config.json`, editable either directly in the file or
 |-----|-------------|
 | `ssh_host` | SSH jump host for the **baseline** environment (where goldens are captured from) |
 | `ssh_host_b` | SSH jump host for the **target** environment (what's compared against the goldens) |
-| `ssh_port` | SSH port — shared by baseline and target (default `22`) |
 | `ssh_user` | SSH username — shared by baseline and target |
 | `ssh_key` | Path to your private key, e.g. `~/.ssh/id_rsa` — shared by baseline and target. Just a file path, not a secret payload, so it's stored in plain text |
 | `db_host` | Postgres host for the **baseline** environment (reachable from `ssh_host`) |
 | `db_host_b` | Postgres host for the **target** environment (reachable from `ssh_host_b`) |
-| `db_port` | Postgres port — shared (default `5432`) |
-| `db_name` | Database name — shared |
-| `db_user` | Database user — shared |
 | `db_table` | Notification table (default `subscriber_history`) |
 | `patterns` | List of `{label, pattern}` objects. `pattern` must match a `subscriber.pattern` value in the DB; the app resolves it to `subscriber.id` and queries `db_table` by that ID. Add as many as you need — no fixed PUT/PICK/AUDIT categories |
 | `poll_interval` | Live-watch DB poll interval in seconds |
-| `project` | DB/ISD project name — golden data saved under `golden/{project}/db/...`, `golden/{project}/isd/...`, `golden/{project}/subscriber/...` |
+| `project` | DB project name — golden data saved under `golden/{project}/db/...` and `golden/{project}/subscriber/...` |
 | `db_pass_enc` / `db_pass_b_enc` | Encrypted DB passwords (see [Secrets](#secrets-in-configjson)) |
+
+> `ssh_port` (22), `db_port` (5432), and `db_user` (`postgres`) are **not configurable** — hardcoded in `core/db.py` since they never change across environments here.
 
 Exportable/importable as one unit from the DB/SSH card's **⬇ Export DB Config** / **⬆ Import DB Config** buttons (`db_config-{project}.json`), including the encrypted password blobs.
 
@@ -110,11 +109,11 @@ Golden snapshots are captured under a **pattern's own label folder**, not by wha
 | `topic_prefix_b` | Kafka topic prefix for the target environment |
 | `topic_count` | Number of latest messages to fetch per topic |
 | `topics` | List of `{label, topic}` objects — the topics displayed in the Kafka tab |
-| `kowl_project` | Kowl's own project name — **independent of `project`** above. Kowl golden data is saved under `golden/{kowl_project}/kowl/...`, a completely separate folder from the DB/ISD project |
+| `kowl_project` | Kowl's own project name — **independent of `project`** above. Kowl golden data is saved under `golden/{kowl_project}/kowl/...`, a completely separate folder from the DB project |
 
 Exportable/importable as one unit from the Kowl card's **⬇ Export Kowl Config** / **⬆ Import Kowl Config** buttons (`kowl_config-{kowl_project}.json`).
 
-> **Why two separate project names?** DB/ISD captures and Kowl topic captures are often run against different environments at different times. Keeping `project` and `kowl_project` independent means renaming/switching one never silently moves or hides the other's golden data.
+> **Why two separate project names?** DB captures and Kowl topic captures are often run against different environments at different times. Keeping `project` and `kowl_project` independent means renaming/switching one never silently moves or hides the other's golden data. An ISD/paste capture auto-detects which of the two it belongs to and files under the matching project.
 
 ### Secrets in `config.json`
 
@@ -140,6 +139,8 @@ The app binds to `0.0.0.0:5050` so it is reachable from other machines on the sa
 
 ## Usage Guide
 
+The app has six tabs in the left nav: **Dashboard**, **Capture Golden**, **Compare**, **Watch (Live)**, **Golden Snapshots**, **Config**. Full Run and Past Reports live on the Dashboard, not as separate tabs.
+
 ### Config Tab
 
 **DB/SSH card:**
@@ -151,10 +152,13 @@ The app binds to `0.0.0.0:5050` so it is reachable from other machines on the sa
 
 **Kowl card:** same flow, but with its own **Kowl Project** field (independent of the DB project above) and **🔌 Test Baseline** / **🔌 Test Target** buttons that check the Kowl host's reachability instead of Postgres.
 
-### DB Notifications — Capture Golden Baseline
+### Capture Golden Tab
 
+Four sources, picked via the pills at the top: **🗄 From DB**, **🧬 From Kowl**, **📄 From ISD**, **👤 Subscriber**.
+
+**🗄 From DB** — capture from a live baseline run:
 1. Run a known-good WMS flow in your **baseline** environment.
-2. Go to the **Capture** tab. Check one or more configured patterns (pulled straight from Config — no need to retype them), or use **Live Poll & Capture** to capture as the flow runs.
+2. Check one or more configured patterns (pulled straight from Config), or use **⚡ Live Poll & Capture** to capture as the flow runs.
 3. Set the **Since** timestamp to just before the flow started (or leave blank for live poll).
 4. Click **Capture**. The app resolves each checked pattern to its `subscriber.id`, fetches matching rows from `subscriber_history` on the **baseline** DB, and saves one `.json` golden per distinct `(type, state, status)` key under `golden/{project}/db/{pattern_label}/`.
 
@@ -163,61 +167,52 @@ For example, with project `Columbus`, capturing pattern `PUT_Success` saves to:
 golden/Columbus/db/PUT_Success/PUT__created__success.json
 ```
 
-### DB Notifications — Compare a New Run
+**🧬 From Kowl** — capture per-topic baselines from the **baseline** Kowl host: **📥 Capture Baseline (snapshot)** pulls the latest N messages for every configured topic once; **⚡ Live Capture** polls continuously until you click Stop, saving one golden per notification key as new ones appear.
 
-1. Trigger the same flow in your **target** environment.
-2. Go to the **Compare** tab and enter/select the pattern to compare.
-3. Set the **Since** timestamp.
-4. Click **Compare**. The app queries the **target** DB and diffs each notification payload against its golden counterpart (looked up under that pattern's own label folder). Results appear as a pass/fail table with expandable diff rows showing exact field-level changes.
+**📄 From ISD** — extract goldens from an ISD spec instead of a live capture:
+1. Pick **Save under: 🗄 DB Project / 🧬 Kowl Project** once at the top — it applies to both methods below.
+2. Either upload an ISD PDF (auto-extracts every recognized notification payload), or paste one/more payloads directly into the **➕ Paste payload(s) as golden** box — a plain ISD payload, a flat notification body, or a raw Kowl message envelope all work; unparseable PDF blocks can be loaded straight into the paste box to fix and retry.
+3. Each payload is auto-detected and saved as a real `db` or `kowl` golden (whichever it actually is) — there is no separate "ISD" golden bucket, so it shows up under the ordinary **Compare** tab like any live capture would. This fills gaps only: if a golden already exists for that exact key, the ISD/paste capture is silently skipped rather than overwriting it.
 
-### Live Watch
+**👤 Subscriber** — snapshot the `subscriber` table row for every configured pattern from the **baseline** env, one file per pattern under `golden/{project}/subscriber/`.
+
+### Compare Tab
+
+Pick a golden source pill, then run the compare:
+
+- **🗄 DB** — enter/select a pattern, set **Since** (or an External Request ID), click **🔍 Compare**. Queries the **target** DB and diffs each notification against its golden. Results are a pass/fail table with expandable diff rows.
+- **🧬 Kowl** — streams the same topics from the **target** Kowl host and diffs them against the stored Kowl baseline. Messages that resolve to the same notification key are automatically collapsed to one row.
+- **🧩 Direct JSON** / **📰 Direct XML** — no DB or Kafka involved: paste the **expected** payload and the **actual** payload, click Compare, differences are highlighted inline.
+- **👤 Subscriber** — fetches each configured pattern's `subscriber` row from the **target** env and diffs it against the baseline snapshot. Shows a full side-by-side baseline-vs-target field table (matching fields included, not just diffs); volatile fields (timestamps, IPs, request IDs) are flagged yellow as a non-failing warning rather than red. Produces a downloadable report that lands in its own **Subscriber Compare Reports** section on the Dashboard.
+
+### Watch (Live) Tab
 
 Use this when you do not know the exact start time of the flow in advance.
 
-1. Go to the **Watch** tab and click **Start Watch**.
+1. Pick golden source **🗄 DB** or **🧬 Kowl**, enter a pattern (DB) if needed, and click **Start Watch**.
 2. Trigger your WMS flow.
-3. The app polls the DB in real time (every `poll_interval` seconds) and streams results to the browser as they arrive.
+3. The app polls in real time (every `poll_interval` seconds for DB) and streams results to the browser as they arrive.
 4. Click **Stop Watch** when done.
 
-### Full Run (Automated)
+### Full Run (Dashboard)
 
-Combines Watch + Compare into a single timed session and generates Allure + HTML reports.
+Combines Watch + Compare into a single timed session and generates Allure + HTML reports. Found at the top of the **Dashboard** tab, not a separate nav item.
 
-1. Go to the **Full Run** tab.
-2. Click **Start**. The app begins watching.
-3. Trigger your flow.
-4. Click **Stop**. The app finalises the comparison and generates reports.
-5. Download the `allure-results.zip` from the **Reports** tab, or view the in-app Allure HTML report if the CLI is installed.
+1. Pick golden source **🗄 DB** or **🧬 Kowl**, then click **▶ Start Full Run**. The app begins watching all configured flows/topics.
+2. Trigger your flow(s).
+3. Click **Stop**. The app finalizes the comparison and generates reports.
+4. Download the `allure-results.zip`, or view the in-app Allure HTML report if the CLI is installed, from the **Past Reports** section further down the Dashboard.
 
-### Kafka / Kowl Topics
+### Golden Snapshots Tab
 
-1. Go to the **Topics** tab.
-2. Click **Capture Baseline** to stream the latest N messages for every configured topic from the **baseline** Kowl host over its WebSocket API.
-3. Later, click **Compare** to stream the same topics from the **target** Kowl host and diff them against the baseline. Both actions have a **Stop** button and survive a page refresh — reopening the page reattaches to a still-running capture/compare instead of losing progress.
+Browse, view, and delete captured goldens (across DB/Kowl/ISD/subscriber sources). Supports multi-select for bulk delete.
 
-### ISD PDF Extraction
+### Dashboard Reports
 
-Use this to create a golden snapshot from an ISD specification PDF rather than a live capture.
+Two independent, collapsed-by-default sections, each with its own **⤢ Expand / ⤡ Minimize** toggle so the page stays short until you need them:
 
-1. Go to **ISD Extract**.
-2. Upload the ISD PDF.
-3. The app extracts structured JSON from the document.
-4. Review the extracted payload, then click **Promote to Golden** to save it as a golden file.
-
-### Direct JSON / XML Compare
-
-No DB, no Kafka — just paste two payloads and compare.
-
-1. Go to **JSON Compare** or **XML Compare**.
-2. Paste the **expected** payload on the left and the **actual** payload on the right.
-3. Click **Compare**. Differences are highlighted inline.
-
-### Past Reports (Dashboard)
-
-- Lists all generated HTML diff reports and Allure runs, each with a stable `#id` (assigned chronologically, oldest = `#1`).
-- Search by report name or project, and sort by newest/oldest or name.
-- Download any report as a ZIP or open the Allure HTML viewer in-browser.
-- Delete individual reports or bulk-clear old runs.
+- **Past Reports** — every HTML diff report and Allure run from DB/Kowl/Full Run compares, each with a stable `#id` (assigned chronologically, oldest = `#1`). Search by name/project, sort newest/oldest/name, download as HTML, open the Allure viewer, or bulk-delete.
+- **Subscriber Compare Reports** — reports from the Subscriber compare feature, kept separate from the list above so the two report kinds never mix. Click a row to expand its per-pattern label/pattern/status breakdown inline.
 
 ---
 
@@ -237,7 +232,7 @@ Comparator/
 │   ├── diffing.py              # DeepDiff wrapper + dynamic field exclusion
 │   ├── live.py                 # Live watch / Full Run logic
 │   ├── kowl.py                 # Kowl WebSocket client (topic capture/compare)
-│   ├── isd.py                  # ISD PDF extraction (PyMuPDF)
+│   ├── isd.py                  # ISD PDF/paste extraction — files straight into db/kowl goldens
 │   ├── allure.py               # Allure results generation
 │   ├── reports.py              # HTML report generation
 │   └── state.py                # In-memory run state
@@ -246,8 +241,9 @@ Comparator/
 │   ├── app.js                  # Frontend logic
 │   └── app.css                 # Styles
 ├── golden/                     # Golden snapshot JSON files (auto-created)
-│   ├── {project}/              #   DB/ISD/subscriber goldens
-│   └── {kowl_project}/kowl/    #   Kowl goldens — independent project namespace
+│   ├── {project}/db/           #   DB (and ISD-captured DB-shaped) goldens, one folder per pattern label
+│   ├── {project}/subscriber/   #   Subscriber snapshot goldens, one file per pattern
+│   └── {kowl_project}/kowl/    #   Kowl (and ISD-captured Kowl-shaped) goldens — independent project namespace
 └── reports/                    # HTML + Allure reports (auto-created)
 ```
 
@@ -263,7 +259,7 @@ createdOn, updatedOn, receivedOn, create_time,
 externalServiceRequestId, sr_parent, sr_parentsIds
 ```
 
-To add or remove fields from this list, edit `IGNORED_FIELDS` in `core/diffing.py`.
+To add or remove fields from this list, edit `IGNORE_FIELDS` in `core/diffing.py`.
 
 ---
 
@@ -288,8 +284,8 @@ To add or remove fields from this list, edit `IGNORED_FIELDS` in `core/diffing.p
 - Some Kowl deployments are behind a reverse proxy or require VPN — verify the URL manually in a browser first.
 
 ### Golden files not found during Compare
-- Run **Capture** first with a known-good flow before comparing.
-- Check that the `project` setting in Config matches the subdirectory name under `golden/` for DB/ISD data, or `kowl_project` for Kowl data — these are two independent values, so double-check you're looking at the right one.
+- Run **Capture** first with a known-good flow before comparing (or capture one from an ISD PDF/paste — either way it must exist before Compare can find it).
+- Check that the `project` setting in Config matches the subdirectory name under `golden/` for DB data, or `kowl_project` for Kowl data — these are two independent values, so double-check you're looking at the right one. An ISD/paste capture files into whichever of the two it auto-detects as (db or kowl), so check both if unsure.
 
 ### Allure report not generated in-app
 - Ensure `allure` is on your `PATH`: `allure --version`
