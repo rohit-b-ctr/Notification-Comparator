@@ -378,10 +378,10 @@
       <div class="card">
         <div class="card-title">👤 Snapshot subscriber config (baseline)</div>
         <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
-          For every pattern configured on the Config tab, fetch the matching row from the
-          <code>subscriber</code> table on the <b>baseline</b> env and store it under the current project
-          (<b id="cap-subscriber-project" style="color:#a5b4fc">none</b>) → <code>subscriber/</code>, one file per pattern label.
-          Used later to detect subscriber config drift on the target env.</p>
+          Fetch every row in the <code>subscriber</code> table on the <b>baseline</b> env — not just
+          patterns configured on the Config tab — and store one snapshot per pattern under the current
+          project (<b id="cap-subscriber-project" style="color:#a5b4fc">none</b>) → <code>subscriber/</code>.
+          Used later to detect subscriber config drift, and missing patterns, on the target env.</p>
         <div class="mt">
           <button class="btn btn-success" onclick="doCaptureSubscriber()" id="cap-subscriber-btn">📸 Capture Subscriber Snapshot</button>
         </div>
@@ -594,9 +594,10 @@
       <div class="card">
         <div class="card-title">👤 Compare subscriber config: target env vs baseline snapshot</div>
         <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">
-          For every pattern configured on the Config tab, fetch the matching <code>subscriber</code> row
-          from the <b>target</b> env and diff it against the baseline snapshot saved via
-          Capture Golden → 👤 Subscriber.</p>
+          For every pattern captured via Capture Golden → 👤 Subscriber (i.e. every pattern that
+          exists in the <b>baseline</b> env — not limited to the Config tab list), fetch the matching
+          <code>subscriber</code> row from the <b>target</b> env. Patterns missing in the target are
+          listed separately with their baseline details; patterns present in both are diffed field by field.</p>
         <div class="mt">
           <button class="btn btn-primary" onclick="doCompareSubscriber()" id="cmp-subscriber-btn">🔍 Compare Subscribers</button>
         </div>
@@ -606,6 +607,7 @@
           <div class="card-title" style="margin:0">Results <span style="font-weight:400;color:var(--text-dim);font-size:12px">(click a row to expand its diffs)</span></div>
           <div id="cmp-subscriber-report-bar" style="display:none;gap:8px"></div>
         </div>
+        <div id="cmp-subscriber-summary" style="display:none;background:rgba(251,146,60,0.12);border:1px solid #fb923c;color:#fb923c;border-radius:6px;padding:8px 12px;font-size:12px;margin-bottom:10px"></div>
         <table class="results-table">
           <thead><tr><th>Label</th><th>Pattern</th><th>Status</th><th>Diffs</th></tr></thead>
           <tbody id="cmp-subscriber-result-body"></tbody>

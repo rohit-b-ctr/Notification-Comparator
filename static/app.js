@@ -657,9 +657,20 @@ async function doCompareSubscriber() {
     const reportBar = document.getElementById('cmp-subscriber-report-bar');
     el.style.display = 'block';
     if (data.ok) {
+      const nMissing = data.results.filter(r => r.status === 'MISSING IN TARGET').length;
+      const summaryBar = document.getElementById('cmp-subscriber-summary');
+      if (summaryBar) {
+        summaryBar.style.display = nMissing ? 'block' : 'none';
+        summaryBar.innerHTML = nMissing
+          ? `⚠️ ${nMissing} pattern(s) exist in the baseline but have <b>no subscriber in the target env</b>: ${
+              escapeHtml(data.results.filter(r => r.status === 'MISSING IN TARGET').map(r => r.label).join(', '))
+            }`
+          : '';
+      }
       body.innerHTML = data.results.map((r, i) => {
         const color = r.status === 'PASS' ? 'var(--log-pass,#86efac)'
-                    : r.status === 'FAIL' ? 'var(--log-fail,#fca5a5)' : '#fbbf24';
+                    : r.status === 'FAIL' ? 'var(--log-fail,#fca5a5)'
+                    : r.status === 'MISSING IN TARGET' ? '#fb923c' : '#fbbf24';
         const findings = r.findings || [];
         const fields = r.fields || [];
         // Side-by-side field table: baseline (left) vs target (right), every

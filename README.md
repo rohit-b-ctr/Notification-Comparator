@@ -13,7 +13,7 @@ A Flask web application that automates WMS notification validation. It captures 
 - **Full Run** — automated end-to-end: watch, capture, and compare in a single flow with Allure report generation
 - **Kafka / Kowl Topic Capture & Compare** — stream messages from Kowl's WebSocket API, save per-topic baselines, and compare target-env topics against them; repeat messages that resolve to the same notification key are automatically collapsed to one row instead of flooding the results table
 - **ISD PDF Extraction & Paste-as-Golden** — extract structured JSON straight from ISD PDF documents, or paste a payload (an ISD-style notification, a flat notification body, or a raw Kowl message envelope) directly. Either way, each payload is auto-detected and filed as a real `db` or `kowl` golden — the same buckets a live DB/Kowl capture uses, so it's found by the ordinary Compare tab with no separate "ISD" comparison mode. Gap-fill only: an ISD/paste capture never overwrites a golden a real live capture already produced for that key
-- **Subscriber Config Compare** — snapshot each configured pattern's `subscriber` table row from the baseline env, then diff the target env's row against it; shows a full side-by-side (baseline vs. target) field table — matching fields included, not just diffs — with drift on volatile fields (timestamps, IPs, request IDs) surfaced as a non-failing warning rather than a hard failure. Reports for this land in their own collapsible "Subscriber Compare Reports" section on the Dashboard, separate from the main Past Reports list
+- **Subscriber Config Compare** — snapshot **every** row in the `subscriber` table from the baseline env (not limited to the patterns typed into the Config tab), then diff each pattern's target-env row against its snapshot. Patterns that exist in the baseline but have no subscriber at all in the target are called out as their own **MISSING IN TARGET** status with the baseline's details shown directly, instead of being lumped into a generic failure. Patterns present on both sides get a full side-by-side (baseline vs. target) field table — matching fields included, not just diffs — with drift on volatile fields (timestamps, IPs, request IDs) surfaced as a non-failing warning rather than a hard failure. Reports for this land in their own collapsible "Subscriber Compare Reports" section on the Dashboard, separate from the main Past Reports list
 - **Direct JSON / XML Compare** — paste two payloads and diff them instantly, no DB or Kafka required
 - **Allure Reports** — every Full Run emits a downloadable `allure-results.zip`; if the Allure CLI is installed, the HTML report is generated in-app automatically
 - **HTML Reports** — lightweight per-run HTML diff reports stored in `reports/`
@@ -174,7 +174,7 @@ golden/Columbus/db/PUT_Success/PUT__created__success.json
 2. Either upload an ISD PDF (auto-extracts every recognized notification payload), or paste one/more payloads directly into the **➕ Paste payload(s) as golden** box — a plain ISD payload, a flat notification body, or a raw Kowl message envelope all work; unparseable PDF blocks can be loaded straight into the paste box to fix and retry.
 3. Each payload is auto-detected and saved as a real `db` or `kowl` golden (whichever it actually is) — there is no separate "ISD" golden bucket, so it shows up under the ordinary **Compare** tab like any live capture would. This fills gaps only: if a golden already exists for that exact key, the ISD/paste capture is silently skipped rather than overwriting it.
 
-**👤 Subscriber** — snapshot the `subscriber` table row for every configured pattern from the **baseline** env, one file per pattern under `golden/{project}/subscriber/`.
+**👤 Subscriber** — snapshot **every** row in the `subscriber` table from the **baseline** env — not just patterns typed into the Config tab — one file per pattern under `golden/{project}/subscriber/`. Config-tab labels are only used to name the file nicer when a pattern happens to be configured; any other pattern is filed under its raw pattern name.
 
 ### Compare Tab
 
@@ -183,7 +183,7 @@ Pick a golden source pill, then run the compare:
 - **🗄 DB** — enter/select a pattern, set **Since** (or an External Request ID), click **🔍 Compare**. Queries the **target** DB and diffs each notification against its golden. Results are a pass/fail table with expandable diff rows.
 - **🧬 Kowl** — streams the same topics from the **target** Kowl host and diffs them against the stored Kowl baseline. Messages that resolve to the same notification key are automatically collapsed to one row.
 - **🧩 Direct JSON** / **📰 Direct XML** — no DB or Kafka involved: paste the **expected** payload and the **actual** payload, click Compare, differences are highlighted inline.
-- **👤 Subscriber** — fetches each configured pattern's `subscriber` row from the **target** env and diffs it against the baseline snapshot. Shows a full side-by-side baseline-vs-target field table (matching fields included, not just diffs); volatile fields (timestamps, IPs, request IDs) are flagged yellow as a non-failing warning rather than red. Produces a downloadable report that lands in its own **Subscriber Compare Reports** section on the Dashboard.
+- **👤 Subscriber** — for every pattern captured via **👤 Subscriber** golden capture (i.e. every pattern that existed in the baseline env at capture time, not just the Config-tab list), fetches the matching `subscriber` row from the **target** env. A pattern missing from the target entirely is reported as **MISSING IN TARGET** with the baseline's details shown directly; a pattern present on both sides gets a full side-by-side baseline-vs-target field table (matching fields included, not just diffs), with volatile fields (timestamps, IPs, request IDs) flagged yellow as a non-failing warning rather than red. Produces a downloadable report that lands in its own **Subscriber Compare Reports** section on the Dashboard, with clickable Pass/Fail/Missing-in-target/Other filter tiles.
 
 ### Watch (Live) Tab
 
@@ -266,6 +266,7 @@ To add or remove fields from this list, edit `IGNORE_FIELDS` in `core/diffing.py
 ## Troubleshooting
 
 ### "SSH connection refused" or tunnel timeout
+- Every SSH tunnel attempt (Capture, Compare, Watch, Full Run, connection tests) already retries up to **5 times**, 3 seconds apart, before failing — so a single transient blip on the gateway won't fail the whole run. If you still see an error after that, it's a real connectivity issue, not a fluke.
 - Confirm VPN is active and the jump host (`ssh_host` for baseline, `ssh_host_b` for target) is reachable: `ping <ssh_host>`
 - Verify the SSH key path is correct and the key has the right permissions: `chmod 600 ~/.ssh/<key>`
 - Try connecting manually: `ssh -i ~/.ssh/<key> <ssh_user>@<ssh_host>`

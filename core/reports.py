@@ -216,7 +216,8 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     total = len(results)
     npass = sum(1 for r in results if r["status"] == "PASS")
     nfail = sum(1 for r in results if r["status"] == "FAIL")
-    nother = total - npass - nfail
+    nmissing = sum(1 for r in results if r["status"] == "MISSING IN TARGET")
+    nother = total - npass - nfail - nmissing
 
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -226,7 +227,7 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     rows = []
     for i, r in enumerate(results):
         st = r["status"]
-        color = {"PASS": "#16a34a", "FAIL": "#dc2626"}.get(st, "#b45309")
+        color = {"PASS": "#16a34a", "FAIL": "#dc2626", "MISSING IN TARGET": "#ea580c"}.get(st, "#b45309")
         fields = r.get("fields") or []
         if fields:
             field_rows = "".join(
@@ -275,27 +276,79 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
   <h1 style="font-size:20px;margin:0 0 4px">{esc(title)}</h1>
   <div style="font-size:12px;color:#64748b;margin-bottom:16px">{meta_rows}</div>
   <div style="display:flex;gap:12px;margin-bottom:20px">
-    <div style="flex:1;background:#fff;border:2px solid #0f172a;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700">{total}</div><div style="font-size:11px;color:#64748b">TOTAL</div></div>
-    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
-    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
-    <div style="flex:1;background:#fff;border-radius:8px;padding:14px;text-align:center"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
+    <div class="stat-tile" data-filter="all" onclick="filterNotifs('all')" style="flex:1;background:#fff;border:2px solid #0f172a;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700">{total}</div><div style="font-size:11px;color:#64748b">TOTAL</div></div>
+    <div class="stat-tile" data-filter="PASS" onclick="filterNotifs('PASS')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
+    <div class="stat-tile" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
+    <div class="stat-tile" data-filter="MISSING IN TARGET" onclick="filterNotifs('MISSING IN TARGET')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#ea580c">{nmissing}</div><div style="font-size:11px;color:#64748b">MISSING IN TARGET</div></div>
+    <div class="stat-tile" data-filter="other" onclick="filterNotifs('other')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:10px;font-size:12px;color:#64748b;align-items:center;flex-wrap:wrap">
+    <span>Filter:</span>
+    <button class="filter-btn" data-filter="all" onclick="filterNotifs('all')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#0f172a;color:#fff;cursor:pointer;font-size:12px">All</button>
+    <button class="filter-btn" data-filter="PASS" onclick="filterNotifs('PASS')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#16a34a;cursor:pointer;font-size:12px">Pass</button>
+    <button class="filter-btn" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#dc2626;cursor:pointer;font-size:12px">Fail</button>
+    <button class="filter-btn" data-filter="MISSING IN TARGET" onclick="filterNotifs('MISSING IN TARGET')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#ea580c;cursor:pointer;font-size:12px">Missing in target</button>
+    <button class="filter-btn" data-filter="other" onclick="filterNotifs('other')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#b45309;cursor:pointer;font-size:12px">Other</button>
+    <button onclick="expandAll()" style="margin-left:12px;padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Expand all</button>
+    <button onclick="collapseAll()" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Collapse all</button>
   </div>
   <div style="font-size:11px;color:#64748b;margin-bottom:10px">
     <span style="color:#0f172a">■</span> same &nbsp;
     <span style="color:#b45309">■</span> differs (warning — expected drift, doesn't fail) &nbsp;
-    <span style="color:#b91c1c">■</span> differs (schema break — fails)
+    <span style="color:#b91c1c">■</span> differs (schema break — fails) &nbsp;
+    <span style="color:#ea580c">■</span> pattern has no subscriber in the target env at all
   </div>
   <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
     <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">LABEL</th><th style="padding:8px;font-size:11px;color:#64748b">PATTERN</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   <script>
+    function rowIdOf(el) {{ return el.id.replace('-arrow', '').replace('-detail', ''); }}
+
     function toggleNotif(rid) {{
       var detail = document.getElementById(rid + '-detail');
       var arrow  = document.getElementById(rid + '-arrow');
       var open   = detail.style.display === 'table-row';
       detail.style.display = open ? 'none' : 'table-row';
       arrow.textContent = open ? '▸' : '▾';
+    }}
+
+    function expandAll() {{
+      document.querySelectorAll('.notif-row').forEach(function(row) {{
+        if (row.style.display === 'none') return;
+        var rid = rowIdOf(row.querySelector('[id$="-arrow"]'));
+        document.getElementById(rid + '-detail').style.display = 'table-row';
+        document.getElementById(rid + '-arrow').textContent = '▾';
+      }});
+    }}
+
+    function collapseAll() {{
+      document.querySelectorAll('.notif-detail').forEach(function(d) {{ d.style.display = 'none'; }});
+      document.querySelectorAll('[id$="-arrow"]').forEach(function(a) {{ a.textContent = '▸'; }});
+    }}
+
+    function filterNotifs(which) {{
+      document.querySelectorAll('.filter-btn').forEach(function(btn) {{
+        var active = btn.dataset.filter === which;
+        btn.style.background = active ? '#0f172a' : '#fff';
+      }});
+      document.querySelectorAll('.stat-tile').forEach(function(tile) {{
+        tile.style.borderColor = tile.dataset.filter === which ? '#0f172a' : 'transparent';
+      }});
+      document.querySelectorAll('.notif-row').forEach(function(row) {{
+        var st = row.dataset.status;
+        var show = which === 'all' ||
+                   (which === 'PASS' && st === 'PASS') ||
+                   (which === 'FAIL' && st === 'FAIL') ||
+                   (which === 'MISSING IN TARGET' && st === 'MISSING IN TARGET') ||
+                   (which === 'other' && st !== 'PASS' && st !== 'FAIL' && st !== 'MISSING IN TARGET');
+        row.style.display = show ? 'table-row' : 'none';
+        if (!show) {{
+          var rid = rowIdOf(row.querySelector('[id$="-arrow"]'));
+          document.getElementById(rid + '-detail').style.display = 'none';
+          document.getElementById(rid + '-arrow').textContent = '▸';
+        }}
+      }});
     }}
   </script>
 </body></html>"""

@@ -1,6 +1,7 @@
 """SSH tunnel + Postgres access."""
 import os
 import socket
+import time
 
 import psycopg2  # type: ignore[import]
 import sshtunnel  # type: ignore[import]
@@ -13,6 +14,9 @@ SSH_CONNECT_TIMEOUT = 6  # seconds
 SSH_PORT = 22
 DB_PORT  = 5432
 DB_USER  = "postgres"
+
+SSH_TUNNEL_RETRIES    = 5  # attempts before giving up on a flaky gateway
+SSH_TUNNEL_RETRY_WAIT = 3  # seconds between attempts
 
 def _check_reachable(host, port, timeout=SSH_CONNECT_TIMEOUT):
     """Fail fast with a clear error instead of the multi-minute OS-level hang
@@ -30,19 +34,35 @@ def _check_reachable(host, port, timeout=SSH_CONNECT_TIMEOUT):
 def open_tunnel(cfg=None, target=False):
     """target=False -> baseline host (where goldens are captured from).
     target=True  -> target host (live traffic compared against those goldens).
-    ssh_user/ssh_key are shared across both; ssh_port/db_port are hardcoded (see above)."""
+    ssh_user/ssh_key are shared across both; ssh_port/db_port are hardcoded (see above).
+
+    Retries up to SSH_TUNNEL_RETRIES times on failure (e.g. the gateway
+    dropping the handshake under load) before giving up, since a single
+    transient blip would otherwise fail the whole capture/compare/watch run.
+    """
     cfg = cfg or get_cfg()
     ssh_host = (cfg.get("ssh_host_b") or cfg["ssh_host"]) if target else cfg["ssh_host"]
     db_host  = (cfg.get("db_host_b")  or cfg["db_host"])  if target else cfg["db_host"]
-    _check_reachable(ssh_host, SSH_PORT)
-    t = sshtunnel.SSHTunnelForwarder(
-        (ssh_host, SSH_PORT),
-        ssh_username=cfg["ssh_user"],
-        ssh_pkey=os.path.expanduser(cfg["ssh_key"]),
-        remote_bind_address=(db_host, DB_PORT),
-    )
-    t.start()
-    return t
+
+    last_err = None
+    for attempt in range(1, SSH_TUNNEL_RETRIES + 1):
+        try:
+            _check_reachable(ssh_host, SSH_PORT)
+            t = sshtunnel.SSHTunnelForwarder(
+                (ssh_host, SSH_PORT),
+                ssh_username=cfg["ssh_user"],
+                ssh_pkey=os.path.expanduser(cfg["ssh_key"]),
+                remote_bind_address=(db_host, DB_PORT),
+            )
+            t.start()
+            return t
+        except Exception as e:
+            last_err = e
+            if attempt < SSH_TUNNEL_RETRIES:
+                time.sleep(SSH_TUNNEL_RETRY_WAIT)
+    raise RuntimeError(
+        f"Could not open SSH tunnel to {ssh_host} after {SSH_TUNNEL_RETRIES} attempts: {last_err}"
+    ) from last_err
 
 def connect_db(tunnel, cfg=None, target=False):
     cfg = cfg or get_cfg()
@@ -99,6 +119,16 @@ def fetch_subscriber_details(cursor, patterns):
         return []
     placeholders = ",".join(["%s"] * len(patterns))
     cursor.execute(f"SELECT * FROM subscriber WHERE pattern IN ({placeholders})", patterns)
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, r)) for r in cursor.fetchall()]
+
+def fetch_all_subscribers(cursor):
+    """Fetch every row from the subscriber table, regardless of which patterns
+    are configured on the Config tab — used to capture/compare *all* patterns
+    that actually exist in the environment, not just the ones a user typed in.
+    Returns a list of dicts, one per subscriber row.
+    """
+    cursor.execute("SELECT * FROM subscriber")
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 

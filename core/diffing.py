@@ -5,8 +5,6 @@ Also hosts XML parsing for the XML comparator (xmltodict -> dict -> DeepDiff).
 import json
 import re
 
-from deepdiff import DeepDiff  # type: ignore[import]
-
 try:
     import xmltodict  # XML comparator support
 except ImportError:
@@ -133,29 +131,50 @@ def side_by_side_fields(golden, actual):
                that's in IGNORE_FIELDS and expected to always differ)
       'fail' — differs in a way that fails the compare (missing/extra key,
                type change) and isn't an ignored field
+
+    Statuses are derived by comparing the two sides' flattened values
+    directly at each path, rather than from a DeepDiff(ignore_order=True)
+    pass: with ignore_order, DeepDiff re-pairs list items by similarity
+    before reporting paths, so its paths don't reliably line up with the
+    positional paths flatten_dict produces (which is what the table actually
+    renders) — for lists that hold several similarly-shaped-but-different
+    items (e.g. multiple subscriber rows for the same pattern), that mismatch
+    silently left genuinely different cells marked 'same'.
     """
     g_full = normalize(golden)
     a_full = normalize(actual)
-    full_findings = diff_to_list(DeepDiff(g_full, a_full, ignore_order=True, verbose_level=2))
-
-    status_by_path = {}
-    for f in full_findings:
-        dp  = deepdiff_path_to_dot(f["path"])
-        top = dp.split(".")[0] if dp else ""
-        if top in IGNORE_FIELDS:
-            status_by_path[dp] = "warn"
-        elif f["type"] in FAIL_FINDING_TYPES:
-            status_by_path[dp] = "fail"
-        else:
-            status_by_path[dp] = "warn"
-
     b_flat = flatten_dict(g_full)
     t_flat = flatten_dict(a_full)
-    return [
-        {"path": p, "baseline": b_flat.get(p), "target": t_flat.get(p),
-         "status": status_by_path.get(p, "same")}
-        for p in sorted(set(b_flat) | set(t_flat))
-    ]
+    _MISSING = object()
+
+    def leaf_name(path):
+        return path.split(".")[-1] if path else path
+
+    rows = []
+    for p in sorted(set(b_flat) | set(t_flat)):
+        bval = b_flat.get(p, _MISSING)
+        tval = t_flat.get(p, _MISSING)
+        if leaf_name(p) in IGNORE_FIELDS:
+            status = "warn"
+        elif bval is _MISSING or tval is _MISSING:
+            status = "fail"
+        elif type(bval) is not type(tval):
+            status = "fail"
+        elif bval != tval:
+            status = "warn"
+        else:
+            status = "same"
+        # Distinguish "field absent on this side" from "field present with a
+        # real null value" — both would otherwise render identically, making
+        # a 'fail' row (baseline lacked a whole sub-object the target has)
+        # look identical to an unrelated 'same' null-vs-null row.
+        rows.append({
+            "path": p,
+            "baseline": "(not present)" if bval is _MISSING else bval,
+            "target": "(not present)" if tval is _MISSING else tval,
+            "status": status,
+        })
+    return rows
 
 def xml_to_obj(text):
     """Parse an XML document into a plain dict so it can flow through the same

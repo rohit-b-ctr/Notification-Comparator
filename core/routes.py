@@ -309,35 +309,43 @@ def api_subscriber_goldens():
 
 @bp.route("/api/subscriber/capture", methods=["POST"])
 def api_subscriber_capture():
-    """Snapshot the subscriber row for each configured pattern from the baseline
-    env and store it under golden/{project}/subscriber/{label}.json."""
+    """Snapshot every subscriber row that actually exists in the baseline env
+    (the whole `subscriber` table, not just patterns typed into the Config
+    tab) and store one golden per pattern under
+    golden/{project}/subscriber/{label}.json."""
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
     cfg = get_cfg()
-    patterns_cfg = cfg.get("patterns", [])
-    if not patterns_cfg:
-        return jsonify({"ok": False, "error": "No patterns configured (Config tab)."}), 400
+    # Config-tab patterns are only consulted for nicer folder names (e.g.
+    # "Put_Success" instead of the raw pattern string) — capture itself is no
+    # longer limited to them.
+    label_by_pattern = {
+        (e.get("pattern") or "").strip(): (e.get("label") or e.get("pattern") or "").strip()
+        for e in cfg.get("patterns", []) if (e.get("pattern") or "").strip()
+    }
     tunnel = None
     try:
         tunnel = open_tunnel(cfg, target=False)
         conn = connect_db(tunnel, cfg, target=False)
         cur = conn.cursor()
-        saved, errors = [], []
-        for entry in patterns_cfg:
-            pattern = (entry.get("pattern") or "").strip()
+        rows = fetch_all_subscribers(cur)
+        if not rows:
+            return jsonify({"ok": False, "error": "No subscriber rows found in the baseline environment."}), 400
+        rows_by_pattern = {}
+        for row in rows:
+            pattern = (row.get("pattern") or "").strip()
             if not pattern:
                 continue
-            label = (entry.get("label") or pattern).strip()
-            rows = fetch_subscriber_details(cur, [pattern])
-            if not rows:
-                errors.append(f"No subscriber found for pattern '{pattern}'")
-                continue
+            rows_by_pattern.setdefault(pattern, []).append(row)
+        saved, errors = [], []
+        for pattern, prows in rows_by_pattern.items():
+            label = label_by_pattern.get(pattern, pattern)
             # Always store a list, even for the (usual) single-row match — if
             # the row count for this pattern ever differs between capture and
             # compare (e.g. a duplicate subscriber row appears/disappears),
             # comparing a bare dict against a list would produce a wholesale
             # type mismatch instead of a meaningful field diff.
-            save_subscriber_golden(label, rows)
+            save_subscriber_golden(label, prows)
             saved.append(label)
         cur.close(); conn.close()
         return jsonify({"ok": True, "saved": saved, "errors": errors})
@@ -348,35 +356,45 @@ def api_subscriber_capture():
 
 @bp.route("/api/subscriber/compare", methods=["POST"])
 def api_subscriber_compare():
-    """Diff each configured pattern's target-env subscriber row against the
-    baseline snapshot captured by /api/subscriber/capture."""
+    """Diff every pattern captured by /api/subscriber/capture (i.e. every
+    pattern that existed in the baseline env at capture time — not just the
+    ones typed into the Config tab) against its target-env subscriber row."""
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
     cfg = get_cfg()
-    patterns_cfg = cfg.get("patterns", [])
-    if not patterns_cfg:
-        return jsonify({"ok": False, "error": "No patterns configured (Config tab)."}), 400
+    labels = list_subscriber_goldens()
+    if not labels:
+        return jsonify({"ok": False, "error": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber first."}), 400
     tunnel = None
     try:
         tunnel = open_tunnel(cfg, target=True)
         conn = connect_db(tunnel, cfg, target=True)
         cur = conn.cursor()
         results = []
-        for entry in patterns_cfg:
-            pattern = (entry.get("pattern") or "").strip()
-            if not pattern:
-                continue
-            label  = (entry.get("label") or pattern).strip()
+        for label in labels:
             golden = load_subscriber_golden(label)
-            if golden is None:
-                results.append({"label": label, "pattern": pattern, "status": "NO GOLDEN", "findings": [], "fields": []})
+            golden_rows = golden if isinstance(golden, list) else [golden]
+            # The pattern lives inside the captured row itself, not in Config —
+            # capture snapshots whatever patterns existed in the baseline env,
+            # so that's the only reliable source for which pattern this golden is.
+            pattern = (golden_rows[0].get("pattern") or "").strip() if golden_rows else ""
+            if not pattern:
+                results.append({"label": label, "pattern": "", "status": "NO GOLDEN", "findings": [], "fields": []})
                 continue
             rows = fetch_subscriber_details(cur, [pattern])
             if not rows:
-                results.append({"label": label, "pattern": pattern, "status": "FAIL", "findings": [
+                # Pattern exists in the baseline golden but has no subscriber row in
+                # the target env at all — surface it as its own status (not a field
+                # diff FAIL) and show the baseline's subscriber details directly,
+                # since there's nothing on the target side to diff against.
+                missing_fields = [
+                    {"path": p, "baseline": v, "target": "NOT FOUND", "status": "fail"}
+                    for p, v in sorted(flatten_dict(normalize(golden_rows)).items())
+                ]
+                results.append({"label": label, "pattern": pattern, "status": "MISSING IN TARGET", "findings": [
                     {"type": "Missing Field", "path": "subscriber",
                      "detail": "No subscriber found in the target environment for this pattern."}
-                ], "fields": []})
+                ], "fields": missing_fields})
                 continue
             # Always a list — see the matching comment in api_subscriber_capture.
             actual = rows
@@ -391,15 +409,23 @@ def api_subscriber_compare():
             # comparing that against a list (or a row count that changed
             # between capture and compare) would otherwise report a wholesale
             # type mismatch instead of a meaningful field diff.
-            golden_rows = golden if isinstance(golden, list) else [golden]
             actual_rows = actual if isinstance(actual, list) else [actual]
-            g = strip_dynamic(normalize(golden_rows))
-            a = strip_dynamic(normalize(actual_rows))
-            diff = DeepDiff(g, a, ignore_order=True, verbose_level=2)
-            findings = diff_to_list(diff)
+            # Derive the pass/fail verdict from the exact same field-by-field
+            # comparison rendered in the table below, instead of running a
+            # second, independent DeepDiff pass over strip_dynamic-ed data.
+            # Two separate diff engines could (and did) disagree on edge
+            # cases — e.g. a field that's null on one side and a populated
+            # object on the other — showing red "fail" cells in the table
+            # while the overall verdict still said PASS.
+            fields = side_by_side_fields(golden_rows, actual_rows)
+            findings = [
+                {"type": "type changes" if f["status"] == "fail" else "values changed",
+                 "path": f["path"], "detail": f"{f['baseline']!r} → {f['target']!r}"}
+                for f in fields if f["status"] != "same"
+            ]
+            status = "FAIL" if any(f["status"] == "fail" for f in fields) else "PASS"
             results.append({"label": label, "pattern": pattern,
-                             "status": status_from_findings(findings), "findings": findings,
-                             "fields": side_by_side_fields(golden_rows, actual_rows)})
+                             "status": status, "findings": findings, "fields": fields})
         cur.close(); conn.close()
 
         # Build a shareable/downloadable HTML report (separate "kind" from
