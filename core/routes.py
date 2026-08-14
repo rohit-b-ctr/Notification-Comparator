@@ -53,6 +53,10 @@ def api_get_config():
     # them out on every reload/refresh.
     cfg["db_pass"]   = RUNTIME_SECRETS.get("db_pass", "")
     cfg["db_pass_b"] = RUNTIME_SECRETS.get("db_pass_b", "")
+    cfg["ssh_pass"]    = RUNTIME_SECRETS.get("ssh_pass", "")
+    cfg["ssh_pass_b"]  = RUNTIME_SECRETS.get("ssh_pass_b", "")
+    cfg["sudo_pass"]   = RUNTIME_SECRETS.get("sudo_pass", "")
+    cfg["sudo_pass_b"] = RUNTIME_SECRETS.get("sudo_pass_b", "")
     return jsonify(cfg)
 
 @bp.route("/api/config", methods=["POST"])
@@ -142,17 +146,40 @@ def api_import_kowl_config():
 
 @bp.route("/api/secrets", methods=["POST"])
 def api_set_secrets():
-    """Store DB passwords in memory. Optionally persist (encrypted) to config.json.
-    ssh_key is not a secret — it's a plain field saved via the main /api/config."""
+    """Store secrets in memory. Optionally persist (encrypted) to config.json.
+    ssh_key is not a secret — it's a plain field saved via the main /api/config.
+    Which fields matter depends on access_mode: cloud uses db_pass/db_pass_b;
+    onprem uses ssh_pass/ssh_pass_b (+ optional sudo_pass/sudo_pass_b) — separate
+    baseline/target values since local vs. prod machines commonly use different
+    passwords."""
     data = request.json
-    db_pass   = data.get("db_pass", "")
-    db_pass_b = data.get("db_pass_b", "")
+    db_pass     = data.get("db_pass", "")
+    db_pass_b   = data.get("db_pass_b", "")
+    ssh_pass    = data.get("ssh_pass", "")
+    ssh_pass_b  = data.get("ssh_pass_b", "")
+    sudo_pass   = data.get("sudo_pass", "")
+    sudo_pass_b = data.get("sudo_pass_b", "")
     if db_pass:
         RUNTIME_SECRETS["db_pass"] = db_pass
     if db_pass_b:
         RUNTIME_SECRETS["db_pass_b"] = db_pass_b
-    if data.get("save_to_disk") and RUNTIME_SECRETS.get("db_pass"):
-        save_secrets_to_disk(RUNTIME_SECRETS["db_pass"], RUNTIME_SECRETS.get("db_pass_b", ""))
+    if ssh_pass:
+        RUNTIME_SECRETS["ssh_pass"] = ssh_pass
+    if ssh_pass_b:
+        RUNTIME_SECRETS["ssh_pass_b"] = ssh_pass_b
+    if sudo_pass:
+        RUNTIME_SECRETS["sudo_pass"] = sudo_pass
+    if sudo_pass_b:
+        RUNTIME_SECRETS["sudo_pass_b"] = sudo_pass_b
+    if data.get("save_to_disk"):
+        save_secrets_to_disk(
+            db_pass=RUNTIME_SECRETS.get("db_pass", ""),
+            db_pass_b=RUNTIME_SECRETS.get("db_pass_b", ""),
+            ssh_pass=RUNTIME_SECRETS.get("ssh_pass", ""),
+            ssh_pass_b=RUNTIME_SECRETS.get("ssh_pass_b", ""),
+            sudo_pass=RUNTIME_SECRETS.get("sudo_pass", ""),
+            sudo_pass_b=RUNTIME_SECRETS.get("sudo_pass_b", ""),
+        )
     return jsonify({"ok": True, "secrets_ready": secrets_ready()})
 
 @bp.route("/api/secrets/saved", methods=["GET"])
@@ -169,17 +196,19 @@ def api_test_connection():
     if not secrets_ready():
         return jsonify({"ok": False, "msg": "⚠️ Enter DB password and SSH key path first"}), 400
     target = bool((request.json or {}).get("target"))
+    handle = None
     try:
         cfg = get_cfg()
-        tunnel = open_tunnel(cfg, target=target)
-        conn = connect_db(tunnel, cfg, target=target)
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.close(); conn.close(); tunnel.stop()
+        handle = open_connection(cfg, target=target)
+        run_query(handle, "SELECT 1")
         which = "target" if target else "baseline"
-        return jsonify({"ok": True, "msg": f"✅ PostgreSQL connection successful ({which})"})
+        mode_label = "on-prem/sudo psql" if handle["mode"] == "onprem" else "PostgreSQL"
+        return jsonify({"ok": True, "msg": f"✅ {mode_label} connection successful ({which})"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
+    finally:
+        if handle:
+            close_connection(handle)
 
 @bp.route("/api/config/test-kowl", methods=["POST"])
 def api_test_kowl():
@@ -218,22 +247,20 @@ def api_capture():
         return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
     since      = data.get("since")  or None
     ext_id     = data.get("ext_id") or None
-    tunnel = None
+    handle = None
     try:
         cfg = get_cfg()
-        tunnel = open_tunnel()
-        conn = connect_db(tunnel)
-        cur = conn.cursor()
+        handle = open_connection(cfg)
         saved, errors, total_fetched = {}, [], 0
         for pattern in patterns:
             label = label_for_pattern(cfg, pattern)
-            sub_ids = resolve_subscriber_ids(cur, [pattern])
+            sub_ids = resolve_subscriber_ids(handle, [pattern])
             if not sub_ids:
                 errors.append(f"No subscriber found for pattern '{pattern}'")
                 continue
             # No since/ext_id given → the "leave blank for last 100" default.
             fetch_limit = 100 if (not since and not ext_id) else 300
-            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id, limit=fetch_limit)
+            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id, limit=fetch_limit)
             total_fetched += len(rows)
             for row in rows:
                 try:
@@ -245,12 +272,11 @@ def api_capture():
                         saved[dedup_key] = True
                 except Exception:
                     pass  # silently skip malformed rows
-        cur.close(); conn.close()
         return jsonify({"ok": True, "saved": list(saved.keys()), "total_fetched": total_fetched, "errors": errors})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        if tunnel: tunnel.stop()
+        if handle: close_connection(handle)
 
 @bp.route("/api/compare", methods=["POST"])
 def api_compare():
@@ -270,25 +296,22 @@ def api_compare():
 
     if not since and not ext_id:
         return jsonify({"ok": False, "error": "Provide either a time range (since) or an External Request ID"}), 400
-    tunnel = None
+    handle = None
     try:
         cfg = get_cfg()
-        tunnel = open_tunnel(target=True)
-        conn = connect_db(tunnel, target=True)
-        cur = conn.cursor()
+        handle = open_connection(cfg, target=True)
         all_results, missing = [], []
         for pattern in patterns:
-            sub_ids = resolve_subscriber_ids(cur, [pattern])
+            sub_ids = resolve_subscriber_ids(handle, [pattern])
             if not sub_ids:
                 missing.append(pattern)
                 continue
             label = label_for_pattern(cfg, pattern)
-            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
+            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
             results = process_rows(rows, mode=mode, source=gsource, label=label)
             for r in results:
                 r["flow"] = label
             all_results.extend(results)
-        cur.close(); conn.close()
         if not all_results and len(missing) == len(patterns):
             return jsonify({"ok": False, "error": f"No subscriber found for pattern(s): {', '.join(missing)}"}), 400
         all_results.sort(key=lambda r: r.get("db_id") or 0)
@@ -298,7 +321,7 @@ def api_compare():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        if tunnel: tunnel.stop()
+        if handle: close_connection(handle)
 
 
 # ─── SUBSCRIBER SNAPSHOT ROUTES (baseline subscriber row per pattern, vs target) ──
@@ -323,12 +346,10 @@ def api_subscriber_capture():
         (e.get("pattern") or "").strip(): (e.get("label") or e.get("pattern") or "").strip()
         for e in cfg.get("patterns", []) if (e.get("pattern") or "").strip()
     }
-    tunnel = None
+    handle = None
     try:
-        tunnel = open_tunnel(cfg, target=False)
-        conn = connect_db(tunnel, cfg, target=False)
-        cur = conn.cursor()
-        rows = fetch_all_subscribers(cur)
+        handle = open_connection(cfg, target=False)
+        rows = fetch_all_subscribers(handle)
         if not rows:
             return jsonify({"ok": False, "error": "No subscriber rows found in the baseline environment."}), 400
         rows_by_pattern = {}
@@ -347,12 +368,11 @@ def api_subscriber_capture():
             # type mismatch instead of a meaningful field diff.
             save_subscriber_golden(label, prows)
             saved.append(label)
-        cur.close(); conn.close()
         return jsonify({"ok": True, "saved": saved, "errors": errors})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        if tunnel: tunnel.stop()
+        if handle: close_connection(handle)
 
 @bp.route("/api/subscriber/compare", methods=["POST"])
 def api_subscriber_compare():
@@ -365,11 +385,9 @@ def api_subscriber_compare():
     labels = list_subscriber_goldens()
     if not labels:
         return jsonify({"ok": False, "error": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber first."}), 400
-    tunnel = None
+    handle = None
     try:
-        tunnel = open_tunnel(cfg, target=True)
-        conn = connect_db(tunnel, cfg, target=True)
-        cur = conn.cursor()
+        handle = open_connection(cfg, target=True)
         results = []
         for label in labels:
             golden = load_subscriber_golden(label)
@@ -381,7 +399,7 @@ def api_subscriber_compare():
             if not pattern:
                 results.append({"label": label, "pattern": "", "status": "NO GOLDEN", "findings": [], "fields": []})
                 continue
-            rows = fetch_subscriber_details(cur, [pattern])
+            rows = fetch_subscriber_details(handle, [pattern])
             if not rows:
                 # Pattern exists in the baseline golden but has no subscriber row in
                 # the target env at all — surface it as its own status (not a field
@@ -426,7 +444,6 @@ def api_subscriber_compare():
             status = "FAIL" if any(f["status"] == "fail" for f in fields) else "PASS"
             results.append({"label": label, "pattern": pattern,
                              "status": status, "findings": findings, "fields": fields})
-        cur.close(); conn.close()
 
         # Build a shareable/downloadable HTML report (separate "kind" from
         # Full Run / Topic Compare so it gets its own section, not mixed into
@@ -445,7 +462,7 @@ def api_subscriber_compare():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        if tunnel: tunnel.stop()
+        if handle: close_connection(handle)
 
 @bp.route("/api/capture/live/start", methods=["POST"])
 def api_capture_live_start():
