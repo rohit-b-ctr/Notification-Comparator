@@ -1,7 +1,9 @@
 """Payload normalization, dynamic-field stripping, and diff helpers.
 
-Also hosts XML parsing for the XML comparator (xmltodict -> dict -> DeepDiff).
+Also hosts XML parsing for the XML comparator (xmltodict -> dict -> DeepDiff)
+and the line-based diff for the plain-text comparator.
 """
+import difflib
 import json
 import re
 
@@ -188,3 +190,38 @@ def xml_to_obj(text):
         return xmltodict.parse(text)
     except Exception as e:
         raise ValueError(f"not valid XML: {e}")
+
+def text_diff_rows(a, b, ignore_whitespace=False):
+    """Line-by-line diff of two plain-text blobs — used by the direct text
+    comparator (unstructured logs, request bodies, config files, ...).
+    Returns (rows, added, removed, changed):
+      rows   — [{a_no, b_no, a, b, status}], status in same/added/removed/changed
+               (a_no/b_no are 1-based line numbers, None on the side missing a line)
+      added/removed/changed — counts, used for the pass/fail verdict
+    """
+    a_lines, b_lines = a.splitlines(), b.splitlines()
+    a_cmp = [l.strip() for l in a_lines] if ignore_whitespace else a_lines
+    b_cmp = [l.strip() for l in b_lines] if ignore_whitespace else b_lines
+    sm = difflib.SequenceMatcher(None, a_cmp, b_cmp, autojunk=False)
+
+    rows, added, removed, changed = [], 0, 0, 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for ai, bj in zip(range(i1, i2), range(j1, j2)):
+                rows.append({"a_no": ai + 1, "b_no": bj + 1, "a": a_lines[ai], "b": b_lines[bj], "status": "same"})
+        else:
+            # "replace" pairs up the overlap as line-level changes and spills
+            # any length difference into pure removed/added rows.
+            for k in range(max(i2 - i1, j2 - j1)):
+                ai = i1 + k if i1 + k < i2 else None
+                bj = j1 + k if j1 + k < j2 else None
+                if ai is not None and bj is not None:
+                    rows.append({"a_no": ai + 1, "b_no": bj + 1, "a": a_lines[ai], "b": b_lines[bj], "status": "changed"})
+                    changed += 1
+                elif ai is not None:
+                    rows.append({"a_no": ai + 1, "b_no": None, "a": a_lines[ai], "b": "", "status": "removed"})
+                    removed += 1
+                else:
+                    rows.append({"a_no": None, "b_no": bj + 1, "a": "", "b": b_lines[bj], "status": "added"})
+                    added += 1
+    return rows, added, removed, changed

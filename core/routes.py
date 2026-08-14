@@ -218,8 +218,6 @@ def api_capture():
         return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
     since      = data.get("since")  or None
     ext_id     = data.get("ext_id") or None
-    if not since and not ext_id:
-        return jsonify({"ok": False, "error": "Provide either a since time or an External Request ID"}), 400
     tunnel = None
     try:
         cfg = get_cfg()
@@ -233,7 +231,9 @@ def api_capture():
             if not sub_ids:
                 errors.append(f"No subscriber found for pattern '{pattern}'")
                 continue
-            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id)
+            # No since/ext_id given → the "leave blank for last 100" default.
+            fetch_limit = 100 if (not since and not ext_id) else 300
+            rows = fetch_notifications(cur, sub_ids, since=since, ext_id=ext_id, limit=fetch_limit)
             total_fetched += len(rows)
             for row in rows:
                 try:
@@ -947,6 +947,21 @@ def api_compare_xml():
         "findings": findings,
         "count": len(findings),
         "payload": b,
+    })
+
+@bp.route("/api/compare/text", methods=["POST"])
+def api_compare_text():
+    """Line-by-line diff of two arbitrary plain-text blobs pasted/uploaded by
+    the user — for unstructured content (logs, request bodies, config files)
+    that doesn't parse as JSON/XML."""
+    data = request.get_json(force=True) or {}
+    raw_a, raw_b = data.get("a") or "", data.get("b") or ""
+    rows, added, removed, changed = text_diff_rows(raw_a, raw_b, ignore_whitespace=bool(data.get("ignore_whitespace")))
+    return jsonify({
+        "status": "PASS" if not (added or removed or changed) else "FAIL",
+        "rows": rows,
+        "added": added, "removed": removed, "changed": changed,
+        "count": added + removed + changed,
     })
 
 # ─── ISD / PROJECT / RUN-ALL / REPORT ROUTES ──────────────────────────────────

@@ -605,15 +605,10 @@ function switchCapSource(src) {
   if (src === 'kowl') {
     initTopics();
     const lbl = document.getElementById('cap-kowl-project');
-    if (lbl) refreshCaptureProject().then(() => {
-      const p = document.getElementById('cap-project-label').textContent;
-      lbl.textContent = p;
-    });
+    if (lbl) refreshCaptureProject().then(p => { lbl.textContent = p; });
   } else if (src === 'subscriber') {
     const lbl = document.getElementById('cap-subscriber-project');
-    if (lbl) refreshCaptureProject().then(() => {
-      lbl.textContent = document.getElementById('cap-project-label').textContent;
-    });
+    if (lbl) refreshCaptureProject().then(p => { lbl.textContent = p; });
   }
 }
 
@@ -744,14 +739,18 @@ async function refreshCaptureProject() {
   try {
     const cfg = await (await fetch('/api/config')).json();
     const p = cfg.project || '(none)';
-    document.getElementById('cap-project-label').textContent = p;
+    const labelEl = document.getElementById('cap-project-label');
+    if (labelEl) labelEl.textContent = p;
     const dbNameEl = document.getElementById('isd-target-db-name');
     const kowlNameEl = document.getElementById('isd-target-kowl-name');
     if (dbNameEl) dbNameEl.textContent = cfg.project || 'none';
     if (kowlNameEl) kowlNameEl.textContent = cfg.kowl_project || 'none';
     renderPatternChecks('cap-pattern-checks', cfg.patterns || []);
     renderPatternChecks('cap-live-pattern-checks', cfg.patterns || []);
-  } catch (e) {}
+    return p;
+  } catch (e) {
+    return document.getElementById('cap-project-label')?.textContent || '(none)';
+  }
 }
 
 // Which project ISD-captured goldens are filed under — 'db' (default) or 'kowl'.
@@ -987,7 +986,7 @@ let topicGoldenSource = 'kowl';  // what golden the kowl panel compares against
 
 // Pick comparison mode: db golden, kowl golden, or standalone direct-JSON
 function setCompareGolden(src) {
-  ['db','kowl','json','xml','subscriber'].forEach(s =>
+  ['db','kowl','json','xml','text','subscriber'].forEach(s =>
     document.getElementById('cmp-gs-' + s).classList.toggle('active', s === src));
   if (src === 'kowl') {
     cmpGoldenSource = 'kowl'; topicGoldenSource = 'kowl';
@@ -996,6 +995,8 @@ function setCompareGolden(src) {
     showComparePanel('json');
   } else if (src === 'xml') {
     showComparePanel('xml');
+  } else if (src === 'text') {
+    showComparePanel('text');
   } else if (src === 'subscriber') {
     showComparePanel('subscriber');
   } else if (src === 'db') {
@@ -1005,13 +1006,14 @@ function setCompareGolden(src) {
 
 // Toggle which compare panel is visible
 function showComparePanel(which) {
-  const isKowl = which === 'kowl', isJson = which === 'json', isXml = which === 'xml';
+  const isKowl = which === 'kowl', isJson = which === 'json', isXml = which === 'xml', isText = which === 'text';
   const isSubscriber = which === 'subscriber';
-  const isDirect = isKowl || isJson || isXml || isSubscriber;
+  const isDirect = isKowl || isJson || isXml || isText || isSubscriber;
   document.getElementById('cmp-tabs-row').style.display = isDirect ? 'none' : 'flex';
   document.getElementById('cmp-src-kowl').style.display = isKowl ? 'block' : 'none';
   document.getElementById('cmp-src-json').style.display = isJson ? 'block' : 'none';
   document.getElementById('cmp-src-xml').style.display  = isXml  ? 'block' : 'none';
+  document.getElementById('cmp-src-text').style.display = isText ? 'block' : 'none';
   document.getElementById('cmp-src-subscriber').style.display = isSubscriber ? 'block' : 'none';
   document.getElementById('cmp-src-notif').style.display = isDirect ? 'none' : 'block';
   if (which === 'notif') switchCmpTab(cmpFetchMode === 'extid' ? 'extid' : 'time');
@@ -1218,6 +1220,55 @@ function setXmlMode(m) {
   document.getElementById('xml-mode-schema').classList.toggle('active', m === 'schema');
 }
 
+function beautifyXml(id) {
+  const ta = document.getElementById(id);
+  const raw = ta.value.trim();
+  if (!raw) return;
+  try {
+    const err = new DOMParser().parseFromString(raw, 'application/xml').querySelector('parsererror');
+    if (err) throw new Error(err.textContent.trim().split('\n')[0]);
+    ta.value = formatXml(raw);
+    jsonStatus(id, '✓ valid XML, beautified', true);
+  } catch (e) {
+    jsonStatus(id, '✗ invalid XML: ' + e.message, false);
+  }
+}
+
+// Indents an XML string one tag per line — regex-based (not a DOM re-serialize)
+// so it doesn't disturb namespaces/entities in the original text.
+function formatXml(xml) {
+  // CDATA content can legally contain a bare '>' immediately followed by '<'
+  // (e.g. <![CDATA[a>b<c]]>) — mask it out first so the newline-insertion
+  // regex below can't split in the middle of it, then restore it verbatim.
+  const cdata = [];
+  xml = xml.trim().replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, m => {
+    cdata.push(m);
+    return ` ${cdata.length - 1} `;
+  });
+  xml = xml.replace(/(>)(<)(\/*)/g, '$1\n$2$3');
+  let pad = 0;
+  const lines = [];
+  for (let line of xml.split('\n')) {
+    line = line.trim();
+    if (!line) continue;
+    // A masked CDATA block (or any bare text node) on its own line is leaf
+    // content, not a tag — never treat it as something to indent into.
+    const startsWithTag = line.startsWith('<');
+    const isClosing = startsWithTag && /^<\//.test(line);
+    const isVoid = startsWithTag && (/^<\?/.test(line) || /^<!--/.test(line) || /\/>$/.test(line));
+    // e.g. <a>1</a> — open+close on one line, no further nesting to indent into
+    const isSelfContained = startsWithTag && !isClosing && !isVoid && /^<[^>]+>[\s\S]*<\/[^>]+>$/.test(line);
+    let indent = 0;
+    if (isClosing) pad = Math.max(pad - 1, 0);
+    else if (startsWithTag && !isVoid && !isSelfContained) indent = 1;
+    lines.push('  '.repeat(pad) + line);
+    pad += indent;
+  }
+  let result = lines.join('\n');
+  if (cdata.length) result = result.replace(/ (\d+) /g, (_, i) => cdata[+i]);
+  return result;
+}
+
 function loadXmlFile(targetId, input) {
   if (!input.files.length) return;
   const reader = new FileReader();
@@ -1264,6 +1315,58 @@ function renderXmlCompare(data) {
     key: xmlMode === 'schema' ? 'schema compare' : 'full compare',
     status: data.status, findings: data.findings, payload: data.payload
   }, 'xml-result-body');
+}
+
+// ── Direct text compare ─────────────────────────────────────────────────────────
+function loadTextFile(targetId, input) {
+  if (!input.files.length) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById(targetId).value = e.target.result;
+    jsonStatus(targetId, '✓ loaded ' + input.files[0].name, true);
+  };
+  reader.readAsText(input.files[0]);
+}
+
+async function doTextCompare() {
+  const btn = document.getElementById('text-cmp-btn');
+  const err = document.getElementById('text-cmp-err');
+  err.textContent = '';
+  const a = document.getElementById('text-a').value;
+  const b = document.getElementById('text-b').value;
+  if (!a.trim() || !b.trim()) { err.textContent = 'Paste or upload text in both A and B.'; return; }
+  btn.disabled = true; btn.textContent = '⏳ Comparing...';
+  try {
+    const res = await fetch('/api/compare/text', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({a, b, ignore_whitespace: document.getElementById('text-ignore-ws').checked})
+    });
+    const data = await res.json();
+    if (data.error) { err.textContent = data.error; }
+    else { renderTextCompare(data); }
+  } catch (e) { err.textContent = 'Compare error: ' + e; }
+  btn.disabled = false; btn.textContent = '📝 Compare Text';
+}
+
+function renderTextCompare(data) {
+  document.getElementById('text-summary').style.display = 'flex';
+  const v = document.getElementById('text-verdict');
+  const vl = verdictLabel(data.status, false);
+  v.textContent = vl.text;
+  v.style.color = vl.color;
+  document.getElementById('text-added').textContent = data.added;
+  document.getElementById('text-removed').textContent = data.removed;
+  document.getElementById('text-changed').textContent = data.changed;
+  document.getElementById('text-result-card').style.display = 'block';
+  const body = document.getElementById('text-result-body');
+  const rowColor = {same: 'inherit', added: '#86efac', removed: '#fca5a5', changed: '#fbbf24'};
+  body.innerHTML = (data.rows || []).map(r => `
+    <tr style="color:${rowColor[r.status]}">
+      <td style="font-family:monospace;font-size:11px;opacity:.7">${r.a_no ?? ''}</td>
+      <td style="font-family:monospace;font-size:11px;opacity:.7">${r.b_no ?? ''}</td>
+      <td style="font-family:monospace;font-size:12px;white-space:pre-wrap">${escapeHtml(r.a)}</td>
+      <td style="font-family:monospace;font-size:12px;white-space:pre-wrap">${escapeHtml(r.b)}</td>
+    </tr>`).join('');
 }
 
 // Multi-pattern chip picker for Compare — lets the user queue up several

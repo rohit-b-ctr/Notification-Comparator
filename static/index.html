@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <title>GreyOrange Notification Comparator</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" type="image/png" href="/static/go-logo.png">
+<link rel="stylesheet" href="/static/app.css?v=74b4dcf0">
 </head>
 <body>
 
@@ -405,6 +406,7 @@
       <span style="display:inline-block;width:1px;height:22px;background:#2d3148;margin:0 10px"></span>
       <div class="flow-pill pill-audit"      id="cmp-gs-json" onclick="setCompareGolden('json')">🧩 Direct JSON</div>
       <div class="flow-pill pill-other"      id="cmp-gs-xml"  onclick="setCompareGolden('xml')">📰 Direct XML</div>
+      <div class="flow-pill pill-other"      id="cmp-gs-text" onclick="setCompareGolden('text')">📝 Direct Text</div>
       <div class="flow-pill pill-other"      id="cmp-gs-subscriber" onclick="setCompareGolden('subscriber')">👤 Subscriber</div>
     </div>
 
@@ -551,6 +553,7 @@
               class="mono-textarea" style="margin-top:5px" placeholder="&lt;root&gt;&lt;paste&gt;expected XML here&lt;/paste&gt;&lt;/root&gt;"></textarea>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
               <input type="file" id="xml-a-file" accept=".xml,text/xml,application/xml,text/plain" style="font-size:12px;color:var(--text-muted)" onchange="loadXmlFile('xml-a', this)">
+              <button class="btn-xs btn-xs-view" onclick="beautifyXml('xml-a')" title="Pretty-print + validate">✨ Beautify</button>
               <span id="xml-a-status" style="font-size:11px"></span>
             </div>
           </div>
@@ -560,6 +563,7 @@
               class="mono-textarea" style="margin-top:5px" placeholder="&lt;root&gt;&lt;paste&gt;actual XML here&lt;/paste&gt;&lt;/root&gt;"></textarea>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
               <input type="file" id="xml-b-file" accept=".xml,text/xml,application/xml,text/plain" style="font-size:12px;color:var(--text-muted)" onchange="loadXmlFile('xml-b', this)">
+              <button class="btn-xs btn-xs-view" onclick="beautifyXml('xml-b')" title="Pretty-print + validate">✨ Beautify</button>
               <span id="xml-b-status" style="font-size:11px"></span>
             </div>
           </div>
@@ -586,6 +590,56 @@
           <thead><tr><th>Pair</th><th>Source</th><th></th><th>Key</th><th>Status</th><th>Diffs</th></tr></thead>
           <tbody id="xml-result-body"></tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Direct text compare (plain, unstructured text — logs, request bodies, config) -->
+    <div id="cmp-src-text" style="display:none">
+      <div class="card">
+        <div class="card-title">📝 Compare two plain-text documents directly</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Paste or upload an <b>Expected (A)</b> and an <b>Actual (B)</b> text block. Diffed line-by-line — for content that isn't JSON/XML (logs, raw request bodies, config files).</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <label style="margin:0">Expected / Baseline (A)</label>
+            <textarea id="text-a" rows="14" spellcheck="false"
+              class="mono-textarea" style="margin-top:5px" placeholder="paste expected text here"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="text-a-file" accept="text/plain,.txt,.log" style="font-size:12px;color:var(--text-muted)" onchange="loadTextFile('text-a', this)">
+              <span id="text-a-status" style="font-size:11px"></span>
+            </div>
+          </div>
+          <div>
+            <label style="margin:0">Actual / Candidate (B)</label>
+            <textarea id="text-b" rows="14" spellcheck="false"
+              class="mono-textarea" style="margin-top:5px" placeholder="paste actual text here"></textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+              <input type="file" id="text-b-file" accept="text/plain,.txt,.log" style="font-size:12px;color:var(--text-muted)" onchange="loadTextFile('text-b', this)">
+              <span id="text-b-status" style="font-size:11px"></span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="text-cmp-btn" onclick="doTextCompare()">📝 Compare Text</button>
+          <label style="margin:0;display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-muted)">
+            <input type="checkbox" id="text-ignore-ws"> ignore leading/trailing whitespace per line
+          </label>
+          <span id="text-cmp-err" style="font-size:12px;color:#fca5a5"></span>
+        </div>
+      </div>
+      <div class="summary-strip" id="text-summary" style="display:none">
+        <div class="summary-card"><div class="num" id="text-verdict" style="font-size:18px">—</div><div class="lbl">Result</div></div>
+        <div class="summary-card"><div class="num" id="text-added" style="color:#86efac">0</div><div class="lbl">Added</div></div>
+        <div class="summary-card"><div class="num" id="text-removed" style="color:#fca5a5">0</div><div class="lbl">Removed</div></div>
+        <div class="summary-card"><div class="num" id="text-changed" style="color:#fbbf24">0</div><div class="lbl">Changed</div></div>
+      </div>
+      <div class="card" id="text-result-card" style="display:none">
+        <div class="card-title">Diff</div>
+        <div style="overflow-x:auto">
+          <table class="results-table" style="width:100%">
+            <thead><tr><th style="width:50px">A#</th><th style="width:50px">B#</th><th>Baseline (A)</th><th>Candidate (B)</th></tr></thead>
+            <tbody id="text-result-body"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -971,6 +1025,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=0390f90d"></script>
 </body>
 </html>

@@ -118,7 +118,7 @@ def fetch_subscriber_details(cursor, patterns):
     if not patterns:
         return []
     placeholders = ",".join(["%s"] * len(patterns))
-    cursor.execute(f"SELECT * FROM subscriber WHERE pattern IN ({placeholders})", patterns)
+    cursor.execute(f"SELECT * FROM subscriber WHERE pattern IN ({placeholders}) ORDER BY id", patterns)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -157,9 +157,16 @@ def fetch_notifications(cursor, subscriber_ids, since=None, ext_id=None, limit=3
     if since:
         q += " AND create_time >= %s"
         params.append(since)
-    q += " ORDER BY id ASC LIMIT %s"
+    # No time/ext_id filter → caller wants "the last N": grab the most recent
+    # rows (DESC) then restore chronological order below, instead of the
+    # oldest N a plain ASC LIMIT would return.
+    most_recent = not since and not ext_id
+    q += f" ORDER BY id {'DESC' if most_recent else 'ASC'} LIMIT %s"
     params.append(limit)
     cursor.execute(q, params)
     cols = [d[0] for d in cursor.description]
-    return [dict(zip(cols, r)) for r in cursor.fetchall()]
+    rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+    if most_recent:
+        rows.reverse()
+    return rows
 

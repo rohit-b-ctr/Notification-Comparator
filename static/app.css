@@ -1,5 +1,10 @@
 /* ── Design tokens — dark (default) ──────────────────────────────────────── */
 :root {
+  /* Native form controls (datetime-local calendar/clock picker, etc.) —
+     without this the picker icon/popup render in the browser's light
+     default and are nearly invisible against our dark inputs. */
+  color-scheme: dark;
+
   /* Surfaces */
   --bg:          #07090f;
   --bg-card:     #0d1220;
@@ -36,6 +41,8 @@
 
 /* ── Light mode overrides ─────────────────────────────────────────────────── */
 body.light {
+  color-scheme: light;
+
   --bg:          #f0f4fb;
   --bg-card:     #ffffff;
   --bg-input:    #f7f9fc;
@@ -273,6 +280,19 @@ input:focus {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 input::placeholder { color: var(--text-dim); }
+
+input[type=datetime-local]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  border-radius: 5px;
+  padding: 4px;
+  margin-right: -4px;
+  opacity: .85;
+  transition: background .15s, opacity .15s;
+}
+input[type=datetime-local]::-webkit-calendar-picker-indicator:hover {
+  background: var(--accent-glow);
+  opacity: 1;
+}
 
 select, textarea {
   background: var(--bg-input);
