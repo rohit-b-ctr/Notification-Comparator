@@ -854,19 +854,65 @@
         </div>
       </div>
 
-      <!-- SSH Key -->
-      <div style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px">
+      <!-- Access mode -->
+      <div style="margin-bottom:14px">
+        <label>Access Mode</label>
+        <div class="flow-pills">
+          <div class="flow-pill active pill-put" id="cfg-mode-cloud"  onclick="setAccessMode('cloud')">☁ Cloud (SSH Key)</div>
+          <div class="flow-pill pill-pick"       id="cfg-mode-onprem" onclick="setAccessMode('onprem')">🖥 Non-Cloud (SSH Password)</div>
+        </div>
+      </div>
+
+      <!-- SSH Key (cloud mode) -->
+      <div id="cfg-cloud-fields" style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>SSH Key <span style="color:var(--text-dim);font-weight:400">(path to private key file)</span></label>
           <input type="text" id="cfg-ssh-key" placeholder="e.g. ~/.ssh/id_rsa">
         </div>
       </div>
 
+      <!-- SSH/sudo password (non-cloud mode) — separate baseline/target values,
+           since local vs. prod machines commonly use different passwords -->
+      <div id="cfg-onprem-fields" style="display:none;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+        <div>
+          <label>SSH Password (baseline)</label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-ssh-pass" placeholder="Enter password" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-ssh-pass-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-ssh-pass','cfg-ssh-pass-toggle')">👁 Show</button>
+          </div>
+        </div>
+        <div>
+          <label>SSH Password (target)</label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-ssh-pass-b" placeholder="Enter password" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-ssh-pass-b-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-ssh-pass-b','cfg-ssh-pass-b-toggle')">👁 Show</button>
+          </div>
+        </div>
+        <div>
+          <label>Sudo Password (baseline) <span style="color:var(--text-dim);font-weight:400">(only if `sudo -u postgres` prompts)</span></label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-sudo-pass" placeholder="Optional" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-sudo-pass-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-sudo-pass','cfg-sudo-pass-toggle')">👁 Show</button>
+          </div>
+        </div>
+        <div>
+          <label>Sudo Password (target) <span style="color:var(--text-dim);font-weight:400">(only if `sudo -u postgres` prompts)</span></label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="cfg-sudo-pass-b" placeholder="Optional" style="flex:1">
+            <button type="button" class="btn btn-ghost" id="cfg-sudo-pass-b-toggle" style="padding:7px 12px;font-size:12px" onclick="toggleVisible('cfg-sudo-pass-b','cfg-sudo-pass-b-toggle')">👁 Show</button>
+          </div>
+        </div>
+      </div>
+
       <!-- divider -->
       <div style="border-top:1px solid #1e2a3a;margin:4px 0 14px"></div>
 
-      <!-- DB hosts row (baseline / target) -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <!-- DB hosts row (baseline / target) — only meaningful in Cloud mode, where the
+           app tunnels through ssh_host to reach a separate db_host. In Non-Cloud mode
+           there's no tunnel: the app SSHes straight into ssh_host and runs psql there,
+           so db_host is unused (see core/db.py open_ssh) and hidden here to avoid
+           implying it's required. -->
+      <div id="cfg-db-hosts-row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div>
           <label>Baseline DB Host <span style="color:var(--text-dim);font-weight:400">(via tunnel)</span></label>
           <input type="text" id="cfg-db-host">
@@ -875,6 +921,9 @@
           <label>Target DB Host <span style="color:var(--text-dim);font-weight:400">(via tunnel)</span></label>
           <input type="text" id="cfg-db-host-b">
         </div>
+      </div>
+      <div id="cfg-db-hosts-onprem-note" style="display:none;margin-bottom:12px;font-size:11px;color:var(--text-dim)">
+        Not needed in Non-Cloud mode — the app connects via SSH Host above and runs <code>psql</code> directly on that box.
       </div>
 
       <!-- DB shared row -->

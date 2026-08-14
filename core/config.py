@@ -14,8 +14,11 @@ CONFIG_PATH = BASE_DIR / "config.json"
 # Fields that are NEVER written to disk in plaintext — only their _enc
 # counterpart (see SECRET_ENC_FIELDS below) is persisted, in config.json.
 # ssh_key is just a local file *path*, not a secret payload, so it's a normal
-# persisted field (see DEFAULT_CONFIG) — only the two DB passwords are encrypted.
-SECRET_FIELDS = {"db_pass", "db_pass_b"}
+# persisted field (see DEFAULT_CONFIG) — only the DB passwords, and (for the
+# non-cloud access mode) the SSH/sudo passwords — baseline and target each
+# have their own, since local vs. prod machines commonly use different
+# passwords — are encrypted.
+SECRET_FIELDS = {"db_pass", "db_pass_b", "ssh_pass", "ssh_pass_b", "sudo_pass", "sudo_pass_b"}
 
 # plaintext field name -> the encrypted-blob field name stored in config.json
 SECRET_ENC_FIELDS = {f: f"{f}_enc" for f in SECRET_FIELDS}
@@ -62,6 +65,11 @@ DEFAULT_CONFIG = {
     # never change here.
     "ssh_user": "rohit_b_ctr_greyorange_com",
     "ssh_key":  "",  # path to private key file — not a secret payload, persisted plainly
+    # "cloud" -> SSH key + direct psycopg2-over-tunnel login (core/db.py open_tunnel).
+    # "onprem" -> SSH username/password login, then `sudo -u postgres psql` run as a
+    # remote command (core/db.py open_ssh) — for hosts where Postgres has no
+    # network/password login at all.
+    "access_mode": "cloud",
     "db_name":  "wms_notification",
     "db_table": "subscriber_history",
     # Notification patterns: each maps a human label to a `subscriber.pattern`
@@ -87,13 +95,15 @@ DEFAULT_CONFIG = {
 
 # Field groupings for the split DB / Kowl config export & import.
 DB_CONFIG_FIELDS = [
-    "ssh_host", "ssh_host_b", "ssh_user", "ssh_key",
+    "ssh_host", "ssh_host_b", "ssh_user", "ssh_key", "access_mode",
     "db_host", "db_host_b", "db_name", "db_table",
     "patterns", "poll_interval", "project",
 ]
-# Encrypted DB password blobs — included in DB config export/import (still
-# ciphertext, only decryptable on a machine holding the same .config_key) but
-# never part of the general load_config()/GET /api/config contract.
+# Encrypted secret blobs — DB passwords always; ssh_pass/sudo_pass only
+# populated when access_mode is "onprem". Included in DB config export/import
+# (still ciphertext, only decryptable on a machine holding the same
+# .config_key) but never part of the general load_config()/GET /api/config
+# contract.
 DB_CONFIG_ENC_FIELDS = list(SECRET_ENC_FIELDS.values())
 KOWL_CONFIG_FIELDS = [
     "topic_host", "topic_host_b", "topic_prefix", "topic_prefix_b", "topic_count", "topics", "kowl_project",
@@ -101,8 +111,12 @@ KOWL_CONFIG_FIELDS = [
 
 # In-memory only — never persisted to disk
 RUNTIME_SECRETS = {
-    "db_pass":   "",  # baseline DB password
-    "db_pass_b": "",  # target DB password
+    "db_pass":    "",  # baseline DB password
+    "db_pass_b":  "",  # target DB password
+    "ssh_pass":   "",  # baseline SSH login password — only used when access_mode == "onprem"
+    "ssh_pass_b": "",  # target SSH login password — only used when access_mode == "onprem"
+    "sudo_pass":  "",  # baseline `sudo -u postgres` password — only if it prompts
+    "sudo_pass_b":"",  # target `sudo -u postgres` password — only if it prompts
 }
 
 def parse_int(value, default=None):
@@ -157,7 +171,14 @@ def get_cfg():
     return cfg
 
 def secrets_ready():
-    return bool(RUNTIME_SECRETS.get("db_pass")) and bool(load_config().get("ssh_key"))
+    """What counts as 'ready to connect' depends on access_mode:
+    - cloud:  SSH key path (plain field) + baseline DB password.
+    - onprem: SSH login password. sudo_pass is optional — only needed if
+      `sudo -u postgres` actually prompts on that host."""
+    cfg = load_config()
+    if cfg.get("access_mode") == "onprem":
+        return bool(RUNTIME_SECRETS.get("ssh_pass"))
+    return bool(RUNTIME_SECRETS.get("db_pass")) and bool(cfg.get("ssh_key"))
 
 # Legacy standalone secrets file — no longer written to, only read once for
 # migration (see _migrate_legacy_secrets_file below).
@@ -183,16 +204,17 @@ def load_saved_secrets():
             found = True
     return found
 
-def save_secrets_to_disk(db_pass, db_pass_b=""):
-    """Encrypt and persist the DB passwords as *_enc fields inside config.json
-    itself — no separate secrets file. Blank fields keep whatever was already
-    saved. (ssh_key isn't handled here — it's a plain persisted field, saved
-    the normal way through save_config()/the main Save button.)"""
+def save_secrets_to_disk(**secrets):
+    """Encrypt and persist any of db_pass / db_pass_b / ssh_pass / sudo_pass
+    as *_enc fields inside config.json itself — no separate secrets file.
+    Blank/omitted fields keep whatever was already saved. (ssh_key isn't
+    handled here — it's a plain persisted field, saved the normal way
+    through save_config()/the main Save button.)"""
     current = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else dict(DEFAULT_CONFIG)
-    if db_pass:
-        current[SECRET_ENC_FIELDS["db_pass"]] = encrypt_secret(db_pass)
-    if db_pass_b:
-        current[SECRET_ENC_FIELDS["db_pass_b"]] = encrypt_secret(db_pass_b)
+    for plain_field, enc_field in SECRET_ENC_FIELDS.items():
+        value = secrets.get(plain_field)
+        if value:
+            current[enc_field] = encrypt_secret(value)
     save_config(current)
 
 def clear_saved_secrets():
@@ -217,7 +239,7 @@ def _migrate_legacy_secrets_file():
         return
     try:
         data = json.loads(SECRETS_PATH.read_text())
-        save_secrets_to_disk(data.get("db_pass", ""), data.get("db_pass_b", ""))
+        save_secrets_to_disk(db_pass=data.get("db_pass", ""), db_pass_b=data.get("db_pass_b", ""))
         ssh_key = data.get("ssh_key", "")
         if ssh_key:
             current = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else dict(DEFAULT_CONFIG)
@@ -259,4 +281,3 @@ GOLDEN_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 # Kowl baselines now live under golden/{project}/kowl/... — TOPIC_DIR is no longer created,
 # only read as a fallback for any pre-migration baselines that might still exist.
-

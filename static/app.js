@@ -1243,7 +1243,7 @@ function formatXml(xml) {
   const cdata = [];
   xml = xml.trim().replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, m => {
     cdata.push(m);
-    return ` ${cdata.length - 1} `;
+    return `${cdata.length - 1}`;
   });
   xml = xml.replace(/(>)(<)(\/*)/g, '$1\n$2$3');
   let pad = 0;
@@ -1265,7 +1265,7 @@ function formatXml(xml) {
     pad += indent;
   }
   let result = lines.join('\n');
-  if (cdata.length) result = result.replace(/ (\d+) /g, (_, i) => cdata[+i]);
+  if (cdata.length) result = result.replace(/(\d+)/g, (_, i) => cdata[+i]);
   return result;
 }
 
@@ -1708,6 +1708,11 @@ async function loadConfig() {
   refreshPatternsDatalist(cfg.patterns || []);
   // ssh_key is just a file path, not a secret — prefilled like any other field
   document.getElementById('cfg-ssh-key').value  = cfg.ssh_key || '';
+  document.getElementById('cfg-ssh-pass').value    = cfg.ssh_pass || '';
+  document.getElementById('cfg-ssh-pass-b').value   = cfg.ssh_pass_b || '';
+  document.getElementById('cfg-sudo-pass').value    = cfg.sudo_pass || '';
+  document.getElementById('cfg-sudo-pass-b').value  = cfg.sudo_pass_b || '';
+  setAccessMode(cfg.access_mode === 'onprem' ? 'onprem' : 'cloud');
   // DB passwords now prefill too, so they don't vanish on Save/refresh
   document.getElementById('cfg-db-pass').value  = cfg.db_pass || '';
   document.getElementById('cfg-db-pass-b').value = cfg.db_pass_b || '';
@@ -1715,6 +1720,21 @@ async function loadConfig() {
   document.getElementById('cfg-secrets-banner').style.display = cfg.secrets_ready ? 'none' : 'block';
   // check if secrets were auto-loaded from .secrets file
   checkSavedSecretsStatus();
+}
+
+// ── Access Mode (cloud SSH key vs on-prem SSH password) ─────────────────────
+let cfgAccessMode = 'cloud';
+function setAccessMode(mode) {
+  cfgAccessMode = mode;
+  document.getElementById('cfg-mode-cloud').classList.toggle('active', mode === 'cloud');
+  document.getElementById('cfg-mode-onprem').classList.toggle('active', mode === 'onprem');
+  document.getElementById('cfg-cloud-fields').style.display  = mode === 'cloud'  ? 'grid' : 'none';
+  document.getElementById('cfg-onprem-fields').style.display = mode === 'onprem' ? 'grid' : 'none';
+  // db_host/db_host_b only matter for the tunnel path (Cloud mode) — Non-Cloud
+  // SSHes straight into ssh_host and runs psql there, so hide the row rather
+  // than implying it's required.
+  document.getElementById('cfg-db-hosts-row').style.display = mode === 'cloud' ? 'grid' : 'none';
+  document.getElementById('cfg-db-hosts-onprem-note').style.display = mode === 'onprem' ? 'block' : 'none';
 }
 
 // Generic export/import used by both the DB config and Kowl config buttons —
@@ -1791,19 +1811,23 @@ async function checkSavedSecretsStatus() {
   if (banner) banner.style.display = data.saved ? 'flex' : 'none';
 }
 
-// Fire-and-forget: pushes whatever's in the DB password fields to the
+// Fire-and-forget: pushes whatever's in the DB/SSH/sudo password fields to the
 // in-memory secret store, always persisted (encrypted) into config.json.
 // Called from saveConfig() so there's a single Save action instead of a
 // separate secrets step — failures here are silent and never block the main
 // config save. (ssh_key isn't a secret — it's just part of the main payload.)
 async function pushSecretsIfPresent() {
-  const db_pass   = document.getElementById('cfg-db-pass').value;
-  const db_pass_b = document.getElementById('cfg-db-pass-b').value;
-  if (!db_pass && !db_pass_b) return;
+  const db_pass     = document.getElementById('cfg-db-pass').value;
+  const db_pass_b   = document.getElementById('cfg-db-pass-b').value;
+  const ssh_pass    = document.getElementById('cfg-ssh-pass').value;
+  const ssh_pass_b  = document.getElementById('cfg-ssh-pass-b').value;
+  const sudo_pass   = document.getElementById('cfg-sudo-pass').value;
+  const sudo_pass_b = document.getElementById('cfg-sudo-pass-b').value;
+  if (!db_pass && !db_pass_b && !ssh_pass && !ssh_pass_b && !sudo_pass && !sudo_pass_b) return;
   try {
     const res = await fetch('/api/secrets', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({db_pass, db_pass_b, save_to_disk: true})
+      body: JSON.stringify({db_pass, db_pass_b, ssh_pass, ssh_pass_b, sudo_pass, sudo_pass_b, save_to_disk: true})
     });
     const data = await res.json();
     if (data.ok) {
@@ -1866,6 +1890,7 @@ async function saveConfig(silent = false) {
     ssh_host_b:        document.getElementById('cfg-ssh-host-b').value,
     ssh_user:          document.getElementById('cfg-ssh-user').value,
     ssh_key:           document.getElementById('cfg-ssh-key').value.trim(),
+    access_mode:       cfgAccessMode,
     db_host:           document.getElementById('cfg-db-host').value,
     db_host_b:         document.getElementById('cfg-db-host-b').value,
     db_name:           document.getElementById('cfg-db-name').value,

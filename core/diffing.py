@@ -57,6 +57,40 @@ def clean_payload(raw):
     data = json.loads(raw) if isinstance(raw, str) else raw
     return strip_dynamic(normalize(data))
 
+def _inventory_transaction_key(payload, nd, ftype):
+    """Key for inventory-transaction-shaped payloads (e.g. a physical
+    pick/put/move event on a rack/slot/PPS) — these have NO state/status
+    lifecycle field at all (they're a point-in-time quantity-change event,
+    not a state machine like PUT/PICK/service-request notifications), so
+    falling back to notif_key()'s normal state/status lookup always hit the
+    "unknown"/"UNKNOWN" default. That collapsed every inventory transaction
+    of a given type (e.g. every "pick") into a single golden file, silently
+    overwriting distinct transactions instead of capturing them separately.
+
+    What actually distinguishes one inventory transaction from another of the
+    same type is the movement — where the item came from and where it went
+    (source.type -> destination.type[.child.type]) — so that's used as the
+    key's second segment instead of a nonexistent state/status.
+    """
+    source_type = str((nd.get("source") or {}).get("type") or "UNKNOWN").upper()
+    dest = nd.get("destination") or {}
+    dest_type = str(dest.get("type") or "UNKNOWN").upper()
+    dest_child_type = str((dest.get("child") or {}).get("type") or "").upper()
+    movement = f"{source_type}_TO_{dest_type}"
+    if dest_child_type:
+        movement += f"_{dest_child_type}"
+    return f"{ftype}__{movement}"
+
+def _is_inventory_transaction(payload, nd):
+    """Detect the inventory-transaction shape rather than relying only on
+    notification_type (which may not always be present/reliable) — the
+    presence of old/new/delta uom-quantity fields is a strong, shape-based
+    signal that this is a quantity-change event rather than a lifecycle
+    notification."""
+    if (payload.get("notification_type") or "").strip().lower() == "inventory_transaction":
+        return True
+    return any(k in nd for k in ("delta_uom_quanty", "new_uom_quantity", "old_uom_quantity"))
+
 def notif_key(payload):
     # Derive key from type, state, status — all from notification_data
     # Shape 1: { notification_data: { type, state, status }, ... }
@@ -68,6 +102,10 @@ def notif_key(payload):
         return str(val).strip() if val else default
 
     ftype  = pick("type").upper()
+
+    if _is_inventory_transaction(payload, nd):
+        return _inventory_transaction_key(payload, nd, ftype)
+
     state  = pick("state").lower()
     status = pick("status").upper()
     return f"{ftype}__{state}__{status}"

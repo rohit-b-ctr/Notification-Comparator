@@ -6,7 +6,7 @@ from deepdiff import DeepDiff  # type: ignore[import]
 
 from core.config import *
 from core.diffing import *
-from core.db import open_tunnel, connect_db, fetch_notifications, resolve_subscriber_ids
+from core.db import open_connection, close_connection, fetch_notifications, resolve_subscriber_ids
 
 def current_project():
     return (load_config().get("project") or "").strip()
@@ -219,20 +219,18 @@ def process_rows(rows, mode="full", source=None, label=None):
 def run_all_db_flows(since=None, limit=200, mode="full", source="db"):
     """Compare recent notifications for every configured pattern against goldens."""
     cfg = get_cfg()
-    tunnel = open_tunnel(cfg, target=True)
+    handle = open_connection(cfg, target=True)
     try:
-        conn = connect_db(tunnel, cfg, target=True)
-        cur = conn.cursor()
         all_results, per_flow = [], {}
         for entry in cfg.get("patterns", []):
             pattern = (entry.get("pattern") or "").strip()
             if not pattern:
                 continue
             flow = (entry.get("label") or pattern).strip()
-            sub_ids = resolve_subscriber_ids(cur, [pattern])
+            sub_ids = resolve_subscriber_ids(handle, [pattern])
             if not sub_ids:
                 continue
-            rows = fetch_notifications(cur, sub_ids, since=since, limit=limit)
+            rows = fetch_notifications(handle, sub_ids, since=since, limit=limit)
             res = process_rows(rows, mode=mode, source=source, label=flow)
             for r in res:
                 r["flow"] = flow
@@ -242,11 +240,8 @@ def run_all_db_flows(since=None, limit=200, mode="full", source="db"):
                 "fail":  sum(1 for r in res if r["status"] == "FAIL"),
             }
             all_results.extend(res)
-        cur.close()
-        conn.close()
         return all_results, per_flow
     finally:
-        tunnel.stop()
+        close_connection(handle)
 
 # ─── LIVE CAPTURE THREAD ──────────────────────────────────────────────────────
-
