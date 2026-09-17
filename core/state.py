@@ -78,3 +78,31 @@ topic_compare_state = {
     "log_queue": Broadcaster(),
     "thread":    None,
 }
+
+# One-shot DB golden capture with per-pattern progress streaming
+db_capture_state = {
+    "running":   False,
+    "log_queue": Broadcaster(),
+    "thread":    None,
+}
+
+# One-shot DB compare with per-pattern progress streaming
+db_compare_state = {
+    "running":   False,
+    "log_queue": Broadcaster(),
+    "thread":    None,
+}
+
+# One-shot subscriber snapshot capture with per-pattern progress streaming
+subscriber_capture_state = {
+    "running":   False,
+    "log_queue": Broadcaster(),
+    "thread":    None,
+}
+
+# One-shot subscriber snapshot compare with per-pattern progress streaming
+subscriber_compare_state = {
+    "running":   False,
+    "log_queue": Broadcaster(),
+    "thread":    None,
+}

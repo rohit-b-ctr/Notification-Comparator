@@ -110,6 +110,19 @@ def notif_key(payload):
     status = pick("status").upper()
     return f"{ftype}__{state}__{status}"
 
+def subscriber_sort_key(row):
+    """Stable ordering key for subscriber rows sharing the same `pattern`.
+
+    `id` isn't usable here: capture reads the baseline env and compare reads
+    the target env, and a pattern can fan out to several subscriber rows, so
+    each side's DB scan order (and even each row's id) can differ between the
+    two environments even when the rows are logically the same routing rules.
+    (url, advance_filter) identifies what a row actually *does*, so sorting
+    both sides by it lines up matching rows positionally regardless of scan
+    order or id drift.
+    """
+    return (str(row.get("url") or ""), str(row.get("advance_filter") or ""))
+
 SCHEMA_ONLY_TYPES = {"dictionary_item_added", "dictionary_item_removed"}
 
 def diff_to_list(diff, mode="full"):

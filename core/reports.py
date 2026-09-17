@@ -217,7 +217,8 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     npass = sum(1 for r in results if r["status"] == "PASS")
     nfail = sum(1 for r in results if r["status"] == "FAIL")
     nmissing = sum(1 for r in results if r["status"] == "MISSING IN TARGET")
-    nother = total - npass - nfail - nmissing
+    nmissing_base = sum(1 for r in results if r["status"] == "MISSING IN BASELINE")
+    nother = total - npass - nfail - nmissing - nmissing_base
 
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -227,24 +228,26 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     rows = []
     for i, r in enumerate(results):
         st = r["status"]
-        color = {"PASS": "#16a34a", "FAIL": "#dc2626", "MISSING IN TARGET": "#ea580c"}.get(st, "#b45309")
+        color = {"PASS": "#16a34a", "FAIL": "#dc2626", "MISSING IN TARGET": "#ea580c",
+                 "MISSING IN BASELINE": "#a855f7"}.get(st, "#b45309")
         fields = r.get("fields") or []
         if fields:
             field_rows = "".join(
                 f'<tr style="border-bottom:1px solid #f1f5f9">'
-                f'<td style="padding:4px 8px;font-family:monospace;font-size:11px;color:#64748b">{esc(f["path"])}</td>'
-                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]}">{esc(f["baseline"])}</td>'
-                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]}">{esc(f["target"])}</td>'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:11px;color:#64748b;word-break:break-word;overflow-wrap:anywhere">{esc(f["path"])}</td>'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]};word-break:break-word;overflow-wrap:anywhere">{esc(f["baseline"])}</td>'
+                f'<td style="padding:4px 8px;font-family:monospace;font-size:12px;color:{FIELD_COLOR[f["status"]]};word-break:break-word;overflow-wrap:anywhere">{esc(f["target"])}</td>'
                 f'</tr>'
                 for f in fields
             )
             detail = (
-                '<table style="width:100%;border-collapse:collapse;margin-top:4px">'
+                '<div style="overflow-x:auto"><table style="width:100%;table-layout:fixed;border-collapse:collapse;margin-top:4px">'
+                '<colgroup><col style="width:18%"><col style="width:41%"><col style="width:41%"></colgroup>'
                 '<thead><tr style="background:#f8fafc;text-align:left">'
                 '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">FIELD</th>'
                 '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">BASELINE</th>'
                 '<th style="padding:4px 8px;font-size:10px;color:#94a3b8">TARGET</th>'
-                '</tr></thead><tbody>' + field_rows + '</tbody></table>'
+                '</tr></thead><tbody>' + field_rows + '</tbody></table></div>'
             )
         else:
             detail = "".join(
@@ -280,6 +283,7 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     <div class="stat-tile" data-filter="PASS" onclick="filterNotifs('PASS')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#16a34a">{npass}</div><div style="font-size:11px;color:#64748b">PASS</div></div>
     <div class="stat-tile" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#dc2626">{nfail}</div><div style="font-size:11px;color:#64748b">FAIL</div></div>
     <div class="stat-tile" data-filter="MISSING IN TARGET" onclick="filterNotifs('MISSING IN TARGET')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#ea580c">{nmissing}</div><div style="font-size:11px;color:#64748b">MISSING IN TARGET</div></div>
+    <div class="stat-tile" data-filter="MISSING IN BASELINE" onclick="filterNotifs('MISSING IN BASELINE')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#a855f7">{nmissing_base}</div><div style="font-size:11px;color:#64748b">MISSING IN BASELINE</div></div>
     <div class="stat-tile" data-filter="other" onclick="filterNotifs('other')" style="flex:1;background:#fff;border:2px solid transparent;border-radius:8px;padding:14px;text-align:center;cursor:pointer"><div style="font-size:26px;font-weight:700;color:#b45309">{nother}</div><div style="font-size:11px;color:#64748b">OTHER</div></div>
   </div>
   <div style="display:flex;gap:8px;margin-bottom:10px;font-size:12px;color:#64748b;align-items:center;flex-wrap:wrap">
@@ -288,6 +292,7 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     <button class="filter-btn" data-filter="PASS" onclick="filterNotifs('PASS')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#16a34a;cursor:pointer;font-size:12px">Pass</button>
     <button class="filter-btn" data-filter="FAIL" onclick="filterNotifs('FAIL')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#dc2626;cursor:pointer;font-size:12px">Fail</button>
     <button class="filter-btn" data-filter="MISSING IN TARGET" onclick="filterNotifs('MISSING IN TARGET')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#ea580c;cursor:pointer;font-size:12px">Missing in target</button>
+    <button class="filter-btn" data-filter="MISSING IN BASELINE" onclick="filterNotifs('MISSING IN BASELINE')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#a855f7;cursor:pointer;font-size:12px">Missing in baseline</button>
     <button class="filter-btn" data-filter="other" onclick="filterNotifs('other')" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#b45309;cursor:pointer;font-size:12px">Other</button>
     <button onclick="expandAll()" style="margin-left:12px;padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Expand all</button>
     <button onclick="collapseAll()" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Collapse all</button>
@@ -296,7 +301,8 @@ def build_subscriber_report(results, title="Subscriber Compare Report", meta=Non
     <span style="color:#0f172a">■</span> same &nbsp;
     <span style="color:#b45309">■</span> differs (warning — expected drift, doesn't fail) &nbsp;
     <span style="color:#b91c1c">■</span> differs (schema break — fails) &nbsp;
-    <span style="color:#ea580c">■</span> pattern has no subscriber in the target env at all
+    <span style="color:#ea580c">■</span> pattern has no subscriber in the target env at all &nbsp;
+    <span style="color:#a855f7">■</span> pattern exists in the target env but was never captured as a baseline
   </div>
   <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
     <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">LABEL</th><th style="padding:8px;font-size:11px;color:#64748b">PATTERN</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>

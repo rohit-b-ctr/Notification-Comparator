@@ -4,8 +4,14 @@ from datetime import datetime
 
 from core.config import *
 from core.diffing import *
-from core.db import open_connection, close_connection, fetch_notifications, resolve_subscriber_ids, db_now
-from core.golden import process_rows, run_all_db_flows, current_project, save_golden, label_for_pattern
+from core.db import (
+    open_connection, close_connection, fetch_notifications, resolve_subscriber_ids, db_now,
+    fetch_all_subscribers,
+)
+from core.golden import (
+    process_rows, run_all_db_flows, current_project, save_golden, label_for_pattern,
+    list_subscriber_goldens, load_subscriber_golden,
+)
 from core.kowl import kowl_watch_loop
 from core.reports import build_html_report, save_report, save_report_meta
 from core.allure import generate_allure, build_allure_results
@@ -86,7 +92,22 @@ def capture_live_thread(patterns, interval, ext_id=None):
 
 # ─── WATCH THREAD ─────────────────────────────────────────────────────────────
 
-def watch_thread_fn(pattern, interval):
+def _all_subscriber_patterns():
+    """Every distinct `pattern` covered by a captured subscriber golden — not
+    just the ones typed into the Config tab. A pattern with fan-out rows is
+    saved as several goldens (pattern, pattern_1, pattern_2, ...) that all
+    share the same `pattern` field, so goldens are deduped down to patterns
+    here rather than watched once per golden file."""
+    patterns = set()
+    for label in list_subscriber_goldens():
+        golden = load_subscriber_golden(label)
+        row = golden[0] if isinstance(golden, list) else golden
+        p = ((row or {}).get("pattern") or "").strip()
+        if p:
+            patterns.add(p)
+    return sorted(patterns)
+
+def watch_thread_fn(pattern, interval, all_patterns=False):
     # NOTE: running is set True by the start endpoint before this thread starts,
     # so a fast stop() can't be clobbered by a late-scheduled thread.
     watch_state["results"] = []
@@ -103,6 +124,9 @@ def watch_thread_fn(pattern, interval):
     # run, every later message with the identical key gets the same schema
     # verdict — so skip re-comparing/re-logging it and just tally how many were
     # skipped, instead of flooding the log with the same diff over and over.
+    # Keyed by (flow, key) rather than bare key in all_patterns mode, so two
+    # different patterns that happen to produce the same notification key
+    # (e.g. both a generic "unknown__UNKNOWN") don't shadow each other.
     seen_keys = {}
     log = watch_state["log_queue"]
     handle = None
@@ -112,31 +136,82 @@ def watch_thread_fn(pattern, interval):
         log.put({"type": "info", "msg": _connect_msg(cfg, target=True)})
         handle = open_connection(cfg, target=True)
         since = db_now(handle)  # DB's own clock — see db_now() for why this matters
-        sub_ids = resolve_subscriber_ids(handle, [pattern])
-        if not sub_ids:
-            log.put({"type": "error", "msg": f"No subscriber found for pattern '{pattern}'."})
-            close_connection(handle)
-            handle = None
-            return
-        label = label_for_pattern(cfg, pattern)
-        log.put({"type": "info", "msg": "Connected. Watching for new notifications..."})
+
+        if all_patterns:
+            patterns = _all_subscriber_patterns()
+            if not patterns:
+                log.put({"type": "error", "msg": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber first."})
+                close_connection(handle)
+                handle = None
+                return
+            # One query for every subscriber row, not one round-trip per
+            # pattern — with dozens of captured patterns over onprem SSH
+            # (each resolve is its own remote `sudo -u postgres psql` call),
+            # doing this per-pattern left the watch looking stuck at
+            # "Connecting..." for a long time with zero visible progress.
+            wanted = set(patterns)
+            rows_by_pattern = {}
+            for row in fetch_all_subscribers(handle):
+                p = (row.get("pattern") or "").strip()
+                if p in wanted:
+                    rows_by_pattern.setdefault(p, []).append(row)
+            # A pattern with fan-out rows (several subscribers listening for
+            # the same pattern) is tagged one *display* flow per row —
+            # pattern, then pattern_1, pattern_2, ... matching the subscriber
+            # golden filenames — so it's visible which specific subscriber a
+            # live notification matched. The *golden lookup* label stays the
+            # base pattern's configured label for every row of that pattern,
+            # not the per-row suffix: notification-payload goldens (Capture
+            # Golden -> DB) are captured once per pattern, since every
+            # subscriber for the same pattern forwards the same kind of
+            # event — looking them up by the dup-suffixed label would never
+            # find the golden captured under the plain pattern name.
+            sub_to_flow, sub_to_golden_label, sub_ids = {}, {}, []
+            for p, prows in rows_by_pattern.items():
+                golden_label = label_for_pattern(cfg, p)
+                for j, row in enumerate(sorted(prows, key=subscriber_sort_key)):
+                    sub_to_flow[row["id"]] = p if j == 0 else f"{p}_{j}"
+                    sub_to_golden_label[row["id"]] = golden_label
+                    sub_ids.append(row["id"])
+            if not sub_ids:
+                log.put({"type": "error", "msg": "None of the captured subscriber patterns matched a subscriber row in the target env."})
+                close_connection(handle)
+                handle = None
+                return
+            log.put({"type": "info", "msg": f"Connected. Watching {len(sub_ids)} subscriber(s)..."})
+        else:
+            sub_ids = resolve_subscriber_ids(handle, [pattern])
+            if not sub_ids:
+                log.put({"type": "error", "msg": f"No subscriber found for pattern '{pattern}'."})
+                close_connection(handle)
+                handle = None
+                return
+            label = label_for_pattern(cfg, pattern)
+            sub_to_flow = {sid: label for sid in sub_ids}
+            sub_to_golden_label = {sid: label for sid in sub_ids}
+            ext_id_msg = watch_state.get("ext_id")
+            mode_msg = f"ext_id={ext_id_msg}" if ext_id_msg else "polling by time"
+            log.put({"type": "info", "msg": f"Connected. Watching pattern '{pattern}' ({mode_msg})..."})
 
         ext_id = watch_state.get("ext_id")
-        mode_msg = f"ext_id={ext_id}" if ext_id else "polling by time"
-        log.put({"type": "info", "msg": f"Connected. Watching pattern '{pattern}' ({mode_msg})..."})
 
         while watch_state["running"]:
             rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
             new = [r for r in rows if r["id"] not in seen]
             for row in new:
                 seen.add(row["id"])
+                row_label = sub_to_flow.get(row.get("subscriber_id"), "OTHER")
+                golden_label = sub_to_golden_label.get(row.get("subscriber_id"), row_label)
                 results = process_rows([row], mode=watch_state.get("mode", "full"),
-                                       source=watch_state.get("source", "db"), label=label)
+                                       source=watch_state.get("source", "db"), label=golden_label)
                 r = results[0]
-                if r["key"] in seen_keys:
-                    seen_keys[r["key"]] += 1
+                if all_patterns:
+                    r["flow"] = row_label
+                dedup_key = (row_label, r["key"]) if all_patterns else r["key"]
+                if dedup_key in seen_keys:
+                    seen_keys[dedup_key] += 1
                     continue
-                seen_keys[r["key"]] = 1
+                seen_keys[dedup_key] = 1
                 watch_state["results"].append(r)
                 icon   = {"PASS": "✅", "FAIL": "❌", "NO GOLDEN": "⚠️", "ERROR": "🔥"}.get(r["status"], "?")
                 # NOTE: use a distinct name — do NOT reassign `ext_id`, which is the
@@ -146,7 +221,8 @@ def watch_thread_fn(pattern, interval):
                 nfail = fail_count(r["findings"])
                 nwarn = len(r["findings"]) - nfail
                 counts = f"{nfail} diff(s)" + (f", {nwarn} warning(s)" if nwarn else "")
-                log.put({"type": r["status"].lower().replace(" ", "_"), "msg": f"{icon} [{r['db_id']}]{ext_str} {r['key']} — {counts}", "result": r})
+                flow_str = f"{row_label} " if all_patterns else ""
+                log.put({"type": r["status"].lower().replace(" ", "_"), "msg": f"{icon} {flow_str}[{r['db_id']}]{ext_str} {r['key']} — {counts}", "result": r})
             time.sleep(interval)
 
         close_connection(handle)

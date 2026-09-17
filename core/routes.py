@@ -21,6 +21,8 @@ from core.live import capture_live_thread, watch_thread_fn, full_watch_thread_fn
 from core.state import (
     watch_state, full_watch_state, capture_state, kowl_capture_state,
     topic_capture_state, topic_compare_state, Broadcaster,
+    db_capture_state, db_compare_state,
+    subscriber_capture_state, subscriber_compare_state,
 )
 
 bp = Blueprint("api", __name__)
@@ -41,6 +43,10 @@ def api_runtime_status():
         "full_watch":     bool(full_watch_state["running"]),
         "topic_capture":  bool(topic_capture_state["running"]),
         "topic_compare":  bool(topic_compare_state["running"]),
+        "db_capture":     bool(db_capture_state["running"]),
+        "db_compare":     bool(db_compare_state["running"]),
+        "subscriber_capture": bool(subscriber_capture_state["running"]),
+        "subscriber_compare": bool(subscriber_compare_state["running"]),
     })
 
 @bp.route("/api/config", methods=["GET"])
@@ -234,25 +240,16 @@ def api_test_kowl():
 def api_goldens():
     return jsonify(list_goldens())
 
-@bp.route("/api/capture", methods=["POST"])
-def api_capture():
-    if not secrets_ready():
-        return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-    data = request.json
-    patterns = data.get("patterns")
-    if patterns is None:  # back-compat with the old single-pattern payload
-        patterns = [data.get("pattern")] if data.get("pattern") else []
-    patterns = [p.strip() for p in patterns if p and p.strip()]
-    if not patterns:
-        return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
-    since      = data.get("since")  or None
-    ext_id     = data.get("ext_id") or None
+def _db_capture_thread(cfg, patterns, since, ext_id, state):
+    log = state["log_queue"]
+    total = len(patterns)
     handle = None
     try:
-        cfg = get_cfg()
         handle = open_connection(cfg)
         saved, errors, total_fetched = {}, [], 0
-        for pattern in patterns:
+        for i, pattern in enumerate(patterns, 1):
+            log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Fetching: {pattern}…"})
             label = label_for_pattern(cfg, pattern)
             sub_ids = resolve_subscriber_ids(handle, [pattern])
             if not sub_ids:
@@ -272,16 +269,94 @@ def api_capture():
                         saved[dedup_key] = True
                 except Exception:
                     pass  # silently skip malformed rows
-        return jsonify({"ok": True, "saved": list(saved.keys()), "total_fetched": total_fetched, "errors": errors})
+        log.put({"type": "done", "saved": list(saved.keys()), "total_fetched": total_fetched, "errors": errors})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        log.put({"type": "error", "msg": str(e)})
     finally:
         if handle: close_connection(handle)
+        state["running"] = False
 
-@bp.route("/api/compare", methods=["POST"])
-def api_compare():
+@bp.route("/api/capture/start", methods=["POST"])
+def api_capture_start():
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
+    t_old = db_capture_state.get("thread")
+    if db_capture_state["running"] and t_old is not None and t_old.is_alive():
+        return jsonify({"ok": False, "error": "Capture already running"}), 400
+    data = request.json
+    patterns = data.get("patterns")
+    if patterns is None:  # back-compat with the old single-pattern payload
+        patterns = [data.get("pattern")] if data.get("pattern") else []
+    patterns = [p.strip() for p in patterns if p and p.strip()]
+    if not patterns:
+        return jsonify({"ok": False, "error": "Enter at least one pattern"}), 400
+    since  = data.get("since")  or None
+    ext_id = data.get("ext_id") or None
+    cfg = get_cfg()
+    db_capture_state["running"]   = True
+    db_capture_state["log_queue"] = Broadcaster()
+    t = threading.Thread(target=_db_capture_thread,
+                         args=(cfg, patterns, since, ext_id, db_capture_state), daemon=True)
+    db_capture_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True, "total": len(patterns)})
+
+@bp.route("/api/capture/stream")
+def api_capture_stream():
+    def generate():
+        idx = 0
+        bus = db_capture_state["log_queue"]
+        while True:
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+def _db_compare_thread(cfg, patterns, mode, since, ext_id, gsource, state):
+    log = state["log_queue"]
+    total = len(patterns)
+    handle = None
+    try:
+        handle = open_connection(cfg, target=True)
+        all_results, missing = [], []
+        for i, pattern in enumerate(patterns, 1):
+            log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Comparing: {pattern}…"})
+            sub_ids = resolve_subscriber_ids(handle, [pattern])
+            if not sub_ids:
+                missing.append(pattern)
+                continue
+            label = label_for_pattern(cfg, pattern)
+            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
+            results = process_rows(rows, mode=mode, source=gsource, label=label)
+            for r in results:
+                r["flow"] = label
+            all_results.extend(results)
+        if not all_results and len(missing) == len(patterns):
+            log.put({"type": "error", "msg": f"No subscriber found for pattern(s): {', '.join(missing)}"})
+            return
+        all_results.sort(key=lambda r: r.get("db_id") or 0)
+        all_results, skipped_repeats = dedupe_by_key(all_results)
+        log.put({"type": "done", "results": all_results, "total": len(all_results),
+                 "skipped_repeats": skipped_repeats, "missing_patterns": missing})
+    except Exception as e:
+        log.put({"type": "error", "msg": str(e)})
+    finally:
+        if handle: close_connection(handle)
+        state["running"] = False
+
+@bp.route("/api/compare/start", methods=["POST"])
+def api_compare_start():
+    if not secrets_ready():
+        return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
+    t_old = db_compare_state.get("thread")
+    if db_compare_state["running"] and t_old is not None and t_old.is_alive():
+        return jsonify({"ok": False, "error": "Compare already running"}), 400
     data     = request.json
     raw_patterns = data.get("patterns")
     if raw_patterns is None:  # back-compat with the old single-`pattern` callers
@@ -296,32 +371,30 @@ def api_compare():
 
     if not since and not ext_id:
         return jsonify({"ok": False, "error": "Provide either a time range (since) or an External Request ID"}), 400
-    handle = None
-    try:
-        cfg = get_cfg()
-        handle = open_connection(cfg, target=True)
-        all_results, missing = [], []
-        for pattern in patterns:
-            sub_ids = resolve_subscriber_ids(handle, [pattern])
-            if not sub_ids:
-                missing.append(pattern)
+    cfg = get_cfg()
+    db_compare_state["running"]   = True
+    db_compare_state["log_queue"] = Broadcaster()
+    t = threading.Thread(target=_db_compare_thread,
+                         args=(cfg, patterns, mode, since, ext_id, gsource, db_compare_state), daemon=True)
+    db_compare_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True, "total": len(patterns)})
+
+@bp.route("/api/compare/stream")
+def api_compare_stream():
+    def generate():
+        idx = 0
+        bus = db_compare_state["log_queue"]
+        while True:
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
                 continue
-            label = label_for_pattern(cfg, pattern)
-            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
-            results = process_rows(rows, mode=mode, source=gsource, label=label)
-            for r in results:
-                r["flow"] = label
-            all_results.extend(results)
-        if not all_results and len(missing) == len(patterns):
-            return jsonify({"ok": False, "error": f"No subscriber found for pattern(s): {', '.join(missing)}"}), 400
-        all_results.sort(key=lambda r: r.get("db_id") or 0)
-        all_results, skipped_repeats = dedupe_by_key(all_results)
-        return jsonify({"ok": True, "results": all_results, "total": len(all_results),
-                         "skipped_repeats": skipped_repeats, "missing_patterns": missing})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    finally:
-        if handle: close_connection(handle)
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ─── SUBSCRIBER SNAPSHOT ROUTES (baseline subscriber row per pattern, vs target) ──
@@ -330,28 +403,15 @@ def api_compare():
 def api_subscriber_goldens():
     return jsonify(list_subscriber_goldens())
 
-@bp.route("/api/subscriber/capture", methods=["POST"])
-def api_subscriber_capture():
-    """Snapshot every subscriber row that actually exists in the baseline env
-    (the whole `subscriber` table, not just patterns typed into the Config
-    tab) and store one golden per pattern under
-    golden/{project}/subscriber/{label}.json."""
-    if not secrets_ready():
-        return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-    cfg = get_cfg()
-    # Config-tab patterns are only consulted for nicer folder names (e.g.
-    # "Put_Success" instead of the raw pattern string) — capture itself is no
-    # longer limited to them.
-    label_by_pattern = {
-        (e.get("pattern") or "").strip(): (e.get("label") or e.get("pattern") or "").strip()
-        for e in cfg.get("patterns", []) if (e.get("pattern") or "").strip()
-    }
+def _subscriber_capture_thread(cfg, state):
+    log = state["log_queue"]
     handle = None
     try:
         handle = open_connection(cfg, target=False)
         rows = fetch_all_subscribers(handle)
         if not rows:
-            return jsonify({"ok": False, "error": "No subscriber rows found in the baseline environment."}), 400
+            log.put({"type": "error", "msg": "No subscriber rows found in the baseline environment."})
+            return
         rows_by_pattern = {}
         for row in rows:
             pattern = (row.get("pattern") or "").strip()
@@ -359,75 +419,156 @@ def api_subscriber_capture():
                 continue
             rows_by_pattern.setdefault(pattern, []).append(row)
         saved, errors = [], []
-        for pattern, prows in rows_by_pattern.items():
-            label = label_by_pattern.get(pattern, pattern)
-            # Always store a list, even for the (usual) single-row match — if
-            # the row count for this pattern ever differs between capture and
-            # compare (e.g. a duplicate subscriber row appears/disappears),
-            # comparing a bare dict against a list would produce a wholesale
-            # type mismatch instead of a meaningful field diff.
-            save_subscriber_golden(label, prows)
-            saved.append(label)
-        return jsonify({"ok": True, "saved": saved, "errors": errors})
+        total = len(rows_by_pattern)
+        # One golden file per raw pattern name — no Config-tab label
+        # substitution. That mapping used to file e.g. `service-request-update`
+        # away under a friendlier name like `Put_Success`, which silently
+        # hid it from the flat capture list and made it look like the
+        # pattern was never captured. Sorted by pattern (not DB-scan order)
+        # purely so filenames come out in a stable order run to run.
+        for i, pattern in enumerate(sorted(rows_by_pattern), 1):
+            # A pattern can fan out to several subscriber rows (different
+            # url/advance_filter routing rules) — store each row as its own
+            # golden file instead of bundling them into one list, so every
+            # row is independently visible/comparable. First row (by
+            # subscriber_sort_key) keeps the plain pattern name; further
+            # rows for the same pattern get a _1, _2, ... postfix.
+            prows = sorted(rows_by_pattern[pattern], key=subscriber_sort_key)
+            log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Capturing: {pattern}…"})
+            for j, row in enumerate(prows):
+                label = pattern if j == 0 else f"{pattern}_{j}"
+                save_subscriber_golden(label, row)
+                saved.append(label)
+        log.put({"type": "done", "saved": saved, "errors": errors})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        log.put({"type": "error", "msg": str(e)})
     finally:
         if handle: close_connection(handle)
+        state["running"] = False
 
-@bp.route("/api/subscriber/compare", methods=["POST"])
-def api_subscriber_compare():
-    """Diff every pattern captured by /api/subscriber/capture (i.e. every
-    pattern that existed in the baseline env at capture time — not just the
-    ones typed into the Config tab) against its target-env subscriber row."""
+@bp.route("/api/subscriber/capture/start", methods=["POST"])
+def api_subscriber_capture_start():
+    """Snapshot every subscriber row that actually exists in the baseline env
+    (the whole `subscriber` table, not just patterns typed into the Config
+    tab) and store one golden per raw pattern name under
+    golden/{project}/subscriber/{pattern}.json."""
     if not secrets_ready():
         return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
+    t_old = subscriber_capture_state.get("thread")
+    if subscriber_capture_state["running"] and t_old is not None and t_old.is_alive():
+        return jsonify({"ok": False, "error": "Capture already running"}), 400
     cfg = get_cfg()
-    labels = list_subscriber_goldens()
-    if not labels:
-        return jsonify({"ok": False, "error": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber first."}), 400
+    subscriber_capture_state["running"]   = True
+    subscriber_capture_state["log_queue"] = Broadcaster()
+    t = threading.Thread(target=_subscriber_capture_thread,
+                         args=(cfg, subscriber_capture_state), daemon=True)
+    subscriber_capture_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True})
+
+@bp.route("/api/subscriber/capture/stream")
+def api_subscriber_capture_stream():
+    def generate():
+        idx = 0
+        bus = subscriber_capture_state["log_queue"]
+        while True:
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+def _dup_index(label, pattern):
+    """A golden labelled exactly `pattern` is row 0 of that pattern's fan-out
+    group; `{pattern}_N` is row N — see _subscriber_capture_thread."""
+    if label == pattern:
+        return 0
+    prefix = f"{pattern}_"
+    if label.startswith(prefix):
+        try:
+            return int(label[len(prefix):])
+        except ValueError:
+            pass
+    return 0
+
+def _subscriber_compare_thread(cfg, labels, state):
+    log = state["log_queue"]
     handle = None
     try:
         handle = open_connection(cfg, target=True)
         results = []
-        for label in labels:
+        total = len(labels)
+
+        # Fetch every target-env subscriber row once up front (rather than
+        # one query per pattern) — needed both to match each baseline row by
+        # position and to spot target rows with no baseline golden at all.
+        target_rows = json.loads(json.dumps(fetch_all_subscribers(handle), default=str))
+        rows_by_target_pattern = {}
+        for row in target_rows:
+            tpattern = (row.get("pattern") or "").strip()
+            if tpattern:
+                rows_by_target_pattern.setdefault(tpattern, []).append(row)
+        for tpattern in rows_by_target_pattern:
+            rows_by_target_pattern[tpattern] = sorted(rows_by_target_pattern[tpattern], key=subscriber_sort_key)
+        consumed = set()  # (pattern, index into rows_by_target_pattern[pattern]) already matched
+
+        for i, label in enumerate(labels, 1):
+            log.put({"type": "progress", "label": label, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Comparing: {label}…"})
             golden = load_subscriber_golden(label)
-            golden_rows = golden if isinstance(golden, list) else [golden]
-            # The pattern lives inside the captured row itself, not in Config —
-            # capture snapshots whatever patterns existed in the baseline env,
-            # so that's the only reliable source for which pattern this golden is.
-            pattern = (golden_rows[0].get("pattern") or "").strip() if golden_rows else ""
-            if not pattern:
-                results.append({"label": label, "pattern": "", "status": "NO GOLDEN", "findings": [], "fields": []})
-                continue
-            rows = fetch_subscriber_details(handle, [pattern])
-            if not rows:
-                # Pattern exists in the baseline golden but has no subscriber row in
-                # the target env at all — surface it as its own status (not a field
-                # diff FAIL) and show the baseline's subscriber details directly,
-                # since there's nothing on the target side to diff against.
-                missing_fields = [
-                    {"path": p, "baseline": v, "target": "NOT FOUND", "status": "fail"}
-                    for p, v in sorted(flatten_dict(normalize(golden_rows)).items())
-                ]
-                results.append({"label": label, "pattern": pattern, "status": "MISSING IN TARGET", "findings": [
-                    {"type": "Missing Field", "path": "subscriber",
-                     "detail": "No subscriber found in the target environment for this pattern."}
-                ], "fields": missing_fields})
-                continue
-            # Always a list — see the matching comment in api_subscriber_capture.
-            actual = rows
-            # Round-trip actual through JSON first — golden was saved (and reloaded)
-            # via json.dumps(default=str)/json.loads, so its datetimes are already
-            # strings; the live psycopg2 row still has raw datetime objects. Without
-            # this, every timestamp column reports a false "type changed" on every
-            # compare regardless of whether the value actually drifted.
-            actual = json.loads(json.dumps(actual, default=str))
-            # Normalize both sides to a list before diffing — older goldens
-            # captured before this fix are a bare dict (single-row shortcut);
-            # comparing that against a list (or a row count that changed
-            # between capture and compare) would otherwise report a wholesale
-            # type mismatch instead of a meaningful field diff.
-            actual_rows = actual if isinstance(actual, list) else [actual]
+            if isinstance(golden, list):
+                # Legacy golden from before per-row files — a whole fan-out
+                # group saved as one list. Diff it against the whole target
+                # group at once (old behavior) rather than trying to split
+                # it into per-row files after the fact.
+                golden_rows = sorted(golden, key=subscriber_sort_key)
+                pattern = (golden_rows[0].get("pattern") or "").strip() if golden_rows else ""
+                if not pattern:
+                    results.append({"label": label, "pattern": "", "status": "NO GOLDEN", "findings": [], "fields": []})
+                    continue
+                actual_rows = rows_by_target_pattern.get(pattern, [])
+                if not actual_rows:
+                    missing_fields = [
+                        {"path": p, "baseline": v, "target": "NOT FOUND", "status": "fail"}
+                        for p, v in sorted(flatten_dict(normalize(golden_rows)).items())
+                    ]
+                    results.append({"label": label, "pattern": pattern, "status": "MISSING IN TARGET", "findings": [
+                        {"type": "Missing Field", "path": "subscriber",
+                         "detail": "No subscriber found in the target environment for this pattern."}
+                    ], "fields": missing_fields})
+                    continue
+                consumed.update((pattern, idx) for idx in range(len(actual_rows)))
+                fields = side_by_side_fields(golden_rows, actual_rows)
+            else:
+                golden_row = golden or {}
+                pattern = (golden_row.get("pattern") or "").strip()
+                if not pattern:
+                    results.append({"label": label, "pattern": "", "status": "NO GOLDEN", "findings": [], "fields": []})
+                    continue
+                idx = _dup_index(label, pattern)
+                target_list = rows_by_target_pattern.get(pattern, [])
+                if idx >= len(target_list):
+                    # This exact row (by position within the pattern's
+                    # fan-out group) has no counterpart in the target env —
+                    # either the whole pattern is gone, or the target simply
+                    # has fewer rows for it than the baseline did.
+                    missing_fields = [
+                        {"path": p, "baseline": v, "target": "NOT FOUND", "status": "fail"}
+                        for p, v in sorted(flatten_dict(normalize(golden_row)).items())
+                    ]
+                    results.append({"label": label, "pattern": pattern, "status": "MISSING IN TARGET", "findings": [
+                        {"type": "Missing Field", "path": "subscriber",
+                         "detail": "No matching subscriber row found in the target environment."}
+                    ], "fields": missing_fields})
+                    continue
+                consumed.add((pattern, idx))
+                fields = side_by_side_fields(golden_row, target_list[idx])
+
             # Derive the pass/fail verdict from the exact same field-by-field
             # comparison rendered in the table below, instead of running a
             # second, independent DeepDiff pass over strip_dynamic-ed data.
@@ -435,7 +576,6 @@ def api_subscriber_compare():
             # cases — e.g. a field that's null on one side and a populated
             # object on the other — showing red "fail" cells in the table
             # while the overall verdict still said PASS.
-            fields = side_by_side_fields(golden_rows, actual_rows)
             findings = [
                 {"type": "type changes" if f["status"] == "fail" else "values changed",
                  "path": f["path"], "detail": f"{f['baseline']!r} → {f['target']!r}"}
@@ -444,6 +584,27 @@ def api_subscriber_compare():
             status = "FAIL" if any(f["status"] == "fail" for f in fields) else "PASS"
             results.append({"label": label, "pattern": pattern,
                              "status": status, "findings": findings, "fields": fields})
+
+        # Reverse check: a subscriber row can exist in the target env with no
+        # baseline counterpart at all — a whole new pattern, or an extra
+        # fan-out row added to an already-known pattern after the last
+        # capture. The loop above only ever walks baseline goldens, so
+        # without this it goes completely unreported.
+        log.put({"type": "progress", "label": "target-only check", "current": total, "total": total,
+                 "msg": "Checking for rows present only in the target…"})
+        for pattern in sorted(rows_by_target_pattern):
+            for idx, trow in enumerate(rows_by_target_pattern[pattern]):
+                if (pattern, idx) in consumed:
+                    continue
+                label = pattern if idx == 0 else f"{pattern}_{idx}"
+                extra_fields = [
+                    {"path": p, "baseline": "NOT FOUND", "target": v, "status": "fail"}
+                    for p, v in sorted(flatten_dict(normalize(trow)).items())
+                ]
+                results.append({"label": label, "pattern": pattern, "status": "MISSING IN BASELINE", "findings": [
+                    {"type": "Extra Field", "path": "subscriber",
+                     "detail": "Subscriber row exists in the target environment but no baseline snapshot was captured for it."}
+                ], "fields": extra_fields})
 
         # Build a shareable/downloadable HTML report (separate "kind" from
         # Full Run / Topic Compare so it gets its own section, not mixed into
@@ -458,11 +619,50 @@ def api_subscriber_compare():
         items = [{"label": r["label"], "pattern": r["pattern"], "status": r["status"]} for r in results]
         save_report_meta(report_name, results, project=current_project(), kind="subscriber_compare", items=items)
 
-        return jsonify({"ok": True, "results": results, "report": report_name})
+        log.put({"type": "done", "results": results, "report": report_name})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        log.put({"type": "error", "msg": str(e)})
     finally:
         if handle: close_connection(handle)
+        state["running"] = False
+
+@bp.route("/api/subscriber/compare/start", methods=["POST"])
+def api_subscriber_compare_start():
+    """Diff every pattern captured by /api/subscriber/capture (i.e. every
+    pattern that existed in the baseline env at capture time — not just the
+    ones typed into the Config tab) against its target-env subscriber row."""
+    if not secrets_ready():
+        return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
+    t_old = subscriber_compare_state.get("thread")
+    if subscriber_compare_state["running"] and t_old is not None and t_old.is_alive():
+        return jsonify({"ok": False, "error": "Compare already running"}), 400
+    cfg = get_cfg()
+    labels = list_subscriber_goldens()
+    if not labels:
+        return jsonify({"ok": False, "error": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber first."}), 400
+    subscriber_compare_state["running"]   = True
+    subscriber_compare_state["log_queue"] = Broadcaster()
+    t = threading.Thread(target=_subscriber_compare_thread,
+                         args=(cfg, labels, subscriber_compare_state), daemon=True)
+    subscriber_compare_state["thread"] = t
+    t.start()
+    return jsonify({"ok": True, "total": len(labels)})
+
+@bp.route("/api/subscriber/compare/stream")
+def api_subscriber_compare_stream():
+    def generate():
+        idx = 0
+        bus = subscriber_compare_state["log_queue"]
+        while True:
+            idx, item = bus.get_from(idx)
+            if item is None:
+                yield 'data: {"type":"ping"}\n\n'
+                continue
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("type") in ("done", "error"):
+                break
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @bp.route("/api/capture/live/start", methods=["POST"])
 def api_capture_live_start():
@@ -571,19 +771,33 @@ def api_watch_start():
     golden = data.get("golden_source") or "db"
     origin = resolve_data_source(golden, data.get("data_source"))
     interval = parse_int(data.get("interval"), 3)
+    all_patterns = bool(data.get("all_patterns"))
     pattern = ""
     if origin == "db":
         if not secrets_ready():
             return jsonify({"ok": False, "error": "⚠️ Enter DB password and SSH key path in Config first"}), 400
-        pattern = (data.get("pattern") or "").strip()
-        if not pattern:
-            return jsonify({"ok": False, "error": "Enter a pattern first"}), 400
+        if all_patterns:
+            if not list_subscriber_goldens():
+                return jsonify({"ok": False, "error": "No subscriber snapshots captured yet. Run Capture Golden → 👤 Subscriber, then Compare Subscribers, first."}), 400
+        else:
+            pattern = (data.get("pattern") or "").strip()
+            if not pattern:
+                return jsonify({"ok": False, "error": "Enter a pattern first"}), 400
     watch_state["mode"]   = data.get("mode", "full")
     watch_state["ext_id"] = data.get("ext_id") or None
     watch_state["source"] = golden
     watch_state["data_source"] = origin
+    # Reset the event log — unlike every other live/capture flow, this one
+    # was never re-created on start, so a fresh /api/watch/stream connection
+    # replayed the *entire* history of every past watch run from idx 0,
+    # including old "done" events. The new run's SSE stream would hit one
+    # of those stale "done" markers almost immediately and close itself,
+    # making the UI think the brand-new run had already finished while the
+    # backend thread was still very much alive — which is also why the next
+    # Start attempt then failed with "Already running".
+    watch_state["log_queue"] = Broadcaster()
     watch_state["running"] = True  # set before start() so a fast stop() wins the race
-    t = threading.Thread(target=watch_thread_fn, args=(pattern, interval), daemon=True)
+    t = threading.Thread(target=watch_thread_fn, args=(pattern, interval, all_patterns), daemon=True)
     watch_state["thread"] = t
     t.start()
     return jsonify({"ok": True})
@@ -604,7 +818,14 @@ def api_watch_stream():
                 yield 'data: {"type":"ping"}\n\n'
                 continue
             yield f"data: {json.dumps(item)}\n\n"
-            if item.get("type") == "done":
+            # "error" ends the run just as much as "done" does — the watch
+            # thread's except block logs an error and dies (running=False)
+            # without ever putting a "done" event, so breaking only on
+            # "done" left this generator (and the browser tab) waiting
+            # forever on a thread that had already exited: the UI kept
+            # showing "Watching..." with no further notifications ever
+            # arriving, since nothing was left running to fetch them.
+            if item.get("type") in ("done", "error"):
                 break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

@@ -31,6 +31,7 @@ function showPage(name) {
   if (name === 'goldens' || name === 'dashboard') loadGoldens();
   if (name === 'config') loadConfig();
   if (name === 'capture') refreshCaptureProject();
+  if (name === 'watch') refreshWatchAllPatternsAvailability();
   if (name === 'dashboard') { loadReports(); checkAllureStatus(); }
 }
 
@@ -80,6 +81,29 @@ function isValueOnly(f) {
   return f.type === 'values changed';
 }
 
+// DB timestamps (create_time) come back with no timezone marker — the DB
+// server's own local clock, typically UTC — and are shown as-is everywhere
+// alongside live-log lines timestamped in the browser's own local time
+// (toLocaleTimeString()). That mismatch makes a notification created
+// seconds ago look hours old whenever the viewer isn't in UTC. Force the
+// raw value to be interpreted as UTC, then render it in the viewer's local
+// time so it lines up with the log. A "flow · <time>" prefix (added by
+// Watch/Full Run to tag which pattern a row belongs to) is preserved as-is;
+// non-timestamp placeholders (e.g. "direct" for JSON/XML/text compare) are
+// left untouched.
+function formatCreateTime(ct) {
+  if (!ct) return ct;
+  const sep = ct.lastIndexOf(' · ');
+  const prefix = sep === -1 ? '' : ct.slice(0, sep + 3);
+  const raw = sep === -1 ? ct : ct.slice(sep + 3);
+  if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(raw)) return ct;
+  let iso = raw.includes(' ') ? raw.replace(' ', 'T') : raw;
+  if (!/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso)) iso += 'Z';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return ct;
+  return prefix + d.toLocaleString();
+}
+
 function renderResultRow(r, tbodyId) {
   const tbody = document.getElementById(tbodyId);
   const uid = ++window.__rowUid;
@@ -97,7 +121,7 @@ function renderResultRow(r, tbodyId) {
   tr.className = 'expandable';
   tr.innerHTML = `
     <td>${r.db_id}</td>
-    <td style="white-space:nowrap;font-size:11px">${r.create_time}</td>
+    <td style="white-space:nowrap;font-size:11px">${formatCreateTime(r.create_time)}</td>
     <td style="font-family:monospace;font-size:11px;color:#64748b">${r.ext_id || '—'}</td>
     <td style="font-family:monospace;font-size:12px">${r.key}</td>
     <td id="${rowId}-status">${statusBadge(r.status)}</td>
@@ -613,59 +637,95 @@ function switchCapSource(src) {
 }
 
 // ── Subscriber snapshot (Capture + Compare) ────────────────────────────────
+// Runs `startUrl` (POST, kicks off a background job) then follows its
+// progress over `streamUrl` (SSE), updating `btn`'s label with a live
+// "[current/total]" count as "progress" events arrive, and resolving with
+// the payload of the terminal "done"/"error" event. Shared by the
+// capture/compare buttons below so each one shows real progress instead of
+// a static "Connecting..." label for the whole duration of the job.
+async function runWithProgress(btn, idleLabel, startUrl, streamUrl, startOpts) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Starting...';
+  try {
+    const startRes = await fetch(startUrl, startOpts);
+    const start = await startRes.json();
+    if (start.ok === false || start.error) {
+      throw new Error(start.error || 'Failed to start');
+    }
+    const result = await new Promise((resolve, reject) => {
+      const sse = new EventSource(streamUrl);
+      sse.onmessage = (e) => {
+        const item = JSON.parse(e.data);
+        if (item.type === 'ping') return;
+        if (item.type === 'progress') {
+          btn.innerHTML = `<span class="spinner"></span> ⏳ [${item.current}/${item.total}] ${Math.round(100 * item.current / item.total)}%`;
+        } else if (item.type === 'done') {
+          sse.close();
+          resolve(item);
+        } else if (item.type === 'error') {
+          sse.close();
+          reject(new Error(item.msg || 'Failed'));
+        }
+      };
+      sse.onerror = () => { sse.close(); reject(new Error('Connection to server lost')); };
+    });
+    return result;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = idleLabel;
+  }
+}
+
 async function doCaptureSubscriber() {
   const btn = document.getElementById('cap-subscriber-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  const el   = document.getElementById('cap-subscriber-result');
+  const body = document.getElementById('cap-subscriber-result-body');
   try {
-    const res = await fetch('/api/subscriber/capture', {method: 'POST'});
-    const data = await res.json();
-    const el   = document.getElementById('cap-subscriber-result');
-    const body = document.getElementById('cap-subscriber-result-body');
+    const data = await runWithProgress(btn, '📸 Capture Subscriber Snapshot',
+      '/api/subscriber/capture/start', '/api/subscriber/capture/stream', {method: 'POST'});
     el.style.display = 'block';
-    if (data.ok) {
-      const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
-      body.innerHTML = `
-        ${errs}
-        <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} subscriber snapshot(s).</p>
-        ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
-      `;
-    } else {
-      body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</p>`;
-    }
+    const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
+    body.innerHTML = `
+      ${errs}
+      <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} subscriber snapshot(s).</p>
+      ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
+    `;
+    refreshWatchAllPatternsAvailability();
   } catch(e) {
-    alert('Error: ' + e.message);
+    el.style.display = 'block';
+    body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${e.message}</p>`;
   }
-  btn.disabled = false;
-  btn.innerHTML = '📸 Capture Subscriber Snapshot';
 }
 
 async function doCompareSubscriber() {
   const btn = document.getElementById('cmp-subscriber-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  const el   = document.getElementById('cmp-subscriber-result');
   try {
-    const res = await fetch('/api/subscriber/compare', {method: 'POST'});
-    const data = await res.json();
-    const el   = document.getElementById('cmp-subscriber-result');
+    const data = await runWithProgress(btn, '🔍 Compare Subscriber Snapshot',
+      '/api/subscriber/compare/start', '/api/subscriber/compare/stream', {method: 'POST'});
     const body = document.getElementById('cmp-subscriber-result-body');
     const reportBar = document.getElementById('cmp-subscriber-report-bar');
     el.style.display = 'block';
-    if (data.ok) {
+    {
       const nMissing = data.results.filter(r => r.status === 'MISSING IN TARGET').length;
+      const nMissingBase = data.results.filter(r => r.status === 'MISSING IN BASELINE').length;
       const summaryBar = document.getElementById('cmp-subscriber-summary');
       if (summaryBar) {
-        summaryBar.style.display = nMissing ? 'block' : 'none';
-        summaryBar.innerHTML = nMissing
-          ? `⚠️ ${nMissing} pattern(s) exist in the baseline but have <b>no subscriber in the target env</b>: ${
-              escapeHtml(data.results.filter(r => r.status === 'MISSING IN TARGET').map(r => r.label).join(', '))
-            }`
-          : '';
+        const notes = [];
+        if (nMissing) notes.push(`⚠️ ${nMissing} pattern(s) exist in the baseline but have <b>no subscriber in the target env</b>: ${
+          escapeHtml(data.results.filter(r => r.status === 'MISSING IN TARGET').map(r => r.label).join(', '))
+        }`);
+        if (nMissingBase) notes.push(`🟣 ${nMissingBase} pattern(s) exist in the target but were <b>never captured as a baseline</b>: ${
+          escapeHtml(data.results.filter(r => r.status === 'MISSING IN BASELINE').map(r => r.label).join(', '))
+        }`);
+        summaryBar.style.display = notes.length ? 'block' : 'none';
+        summaryBar.innerHTML = notes.join('<br>');
       }
       body.innerHTML = data.results.map((r, i) => {
         const color = r.status === 'PASS' ? 'var(--log-pass,#86efac)'
                     : r.status === 'FAIL' ? 'var(--log-fail,#fca5a5)'
-                    : r.status === 'MISSING IN TARGET' ? '#fb923c' : '#fbbf24';
+                    : r.status === 'MISSING IN TARGET' ? '#fb923c'
+                    : r.status === 'MISSING IN BASELINE' ? '#c084fc' : '#fbbf24';
         const findings = r.findings || [];
         const fields = r.fields || [];
         // Side-by-side field table: baseline (left) vs target (right), every
@@ -675,16 +735,17 @@ async function doCompareSubscriber() {
         const FIELD_COLOR = {same: 'var(--text-muted)', warn: '#fbbf24', fail: 'var(--log-fail,#fca5a5)'};
         let detail;
         if (fields.length) {
-          detail = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+          detail = `<div style="overflow-x:auto"><table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px">
+            <colgroup><col style="width:18%"><col style="width:41%"><col style="width:41%"></colgroup>
             <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
               <th style="padding:3px 8px">FIELD</th><th style="padding:3px 8px">BASELINE</th><th style="padding:3px 8px">TARGET</th>
             </tr></thead>
             <tbody>${fields.map(f => `<tr>
-              <td style="padding:3px 8px;font-family:monospace;font-size:11px;color:var(--text-dim)">${escapeHtml(f.path)}</td>
-              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]}">${escapeHtml(String(f.baseline))}</td>
-              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]}">${escapeHtml(String(f.target))}</td>
+              <td style="padding:3px 8px;font-family:monospace;font-size:11px;color:var(--text-dim);word-break:break-word;overflow-wrap:anywhere">${escapeHtml(f.path)}</td>
+              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.baseline))}</td>
+              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.target))}</td>
             </tr>`).join('')}</tbody>
-          </table>`;
+          </table></div>`;
         } else {
           detail = findings.map(f => {
             const isWarn = f.type === 'values changed';
@@ -708,15 +769,14 @@ async function doCompareSubscriber() {
           <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}" target="_blank">📄 View Report</a>
           <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}?download=1">⬇ Download Report</a>` : '';
       }
-    } else {
-      body.innerHTML = `<tr><td colspan="4" style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</td></tr>`;
-      if (reportBar) reportBar.style.display = 'none';
     }
   } catch(e) {
-    alert('Error: ' + e.message);
+    el.style.display = 'block';
+    document.getElementById('cmp-subscriber-result-body').innerHTML =
+      `<tr><td colspan="4" style="color:var(--log-fail,#fca5a5)">❌ ${e.message}</td></tr>`;
+    const reportBar = document.getElementById('cmp-subscriber-report-bar');
+    if (reportBar) reportBar.style.display = 'none';
   }
-  btn.disabled = false;
-  btn.innerHTML = '🔍 Compare Subscribers';
 }
 
 function renderPatternChecks(containerId, patterns) {
@@ -870,8 +930,8 @@ function switchWatchFetchTab(tab) {
 
 async function doCapture() {
   const btn = document.getElementById('cap-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  const el   = document.getElementById('cap-result');
+  const body = document.getElementById('cap-result-body');
 
   const patterns = checkedPatterns('cap-pattern-checks');
   const since  = capFetchMode === 'time'  ? datetimeLocalToISO(document.getElementById('cap-since').value) : null;
@@ -879,38 +939,30 @@ async function doCapture() {
 
   if (!patterns.length) {
     alert('Select at least one pattern (add them on the Config tab if none are listed).');
-    btn.disabled = false; btn.innerHTML = '📸 Capture'; return;
+    return;
   }
   if (capFetchMode === 'extid' && !ext_id) {
     alert('Please enter an External Request ID.');
-    btn.disabled = false; btn.innerHTML = '📸 Capture'; return;
+    return;
   }
 
   try {
-    const res = await fetch('/api/capture', {
+    const data = await runWithProgress(btn, '📸 Capture', '/api/capture/start', '/api/capture/stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({patterns, since, ext_id})
     });
-    const data = await res.json();
-    const el   = document.getElementById('cap-result');
-    const body = document.getElementById('cap-result-body');
     el.style.display = 'block';
-    if (data.ok) {
-      const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
-      body.innerHTML = `
-        ${errs}
-        <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} golden snapshot(s) from ${data.total_fetched} notifications.</p>
-        ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
-      `;
-    } else {
-      body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${data.error}</p>`;
-    }
+    const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
+    body.innerHTML = `
+      ${errs}
+      <p style="color:var(--log-pass,#86efac);margin-bottom:10px">✅ Captured ${data.saved.length} golden snapshot(s) from ${data.total_fetched} notifications.</p>
+      ${data.saved.map(k=>`<div style="font-family:monospace;font-size:12px;color:#a5b4fc;padding:2px 0">${k}</div>`).join('')}
+    `;
   } catch(e) {
-    alert('Error: ' + e.message);
+    el.style.display = 'block';
+    body.innerHTML = `<p style="color:var(--log-fail,#fca5a5)">❌ ${e.message}</p>`;
   }
-  btn.disabled = false;
-  btn.innerHTML = '📸 Capture';
 }
 
 // ── Live Capture ──────────────────────────────────────────────────────────────
@@ -1400,8 +1452,6 @@ function renderCmpPatternChips() {
 
 async function doCompare() {
   const btn = document.getElementById('cmp-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Comparing...';
 
   const typed = document.getElementById('cmp-pattern').value.trim();
   if (typed && !cmpPatterns.includes(typed)) { cmpPatterns.push(typed); renderCmpPatternChips(); }
@@ -1411,32 +1461,23 @@ async function doCompare() {
 
   if (patterns.length === 0) {
     alert('Please add at least one pattern.');
-    btn.disabled = false;
-    btn.innerHTML = '🔍 Compare';
     return;
   }
   if (cmpFetchMode === 'time' && !since) {
     alert('Please set a Since time or use By Request ID mode.');
-    btn.disabled = false;
-    btn.innerHTML = '🔍 Compare';
     return;
   }
   if (cmpFetchMode === 'extid' && !ext_id) {
     alert('Please enter an External Request ID.');
-    btn.disabled = false;
-    btn.innerHTML = '🔍 Compare';
     return;
   }
 
   try {
-    const res = await fetch('/api/compare', {
+    const data = await runWithProgress(btn, '🔍 Compare', '/api/compare/start', '/api/compare/stream', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({patterns, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
     });
-    const data = await res.json();
-
-    if (!data.ok) { alert('Error: ' + data.error); return; }
 
     const pass = data.results.filter(r=>r.status==='PASS').length;
     const fail = data.results.filter(r=>r.status==='FAIL').length;
@@ -1472,9 +1513,6 @@ async function doCompare() {
   } catch(e) {
     alert('Error: ' + e.message);
   }
-
-  btn.disabled = false;
-  btn.innerHTML = '🔍 Compare';
 }
 
 // ── Watch ─────────────────────────────────────────────────────────────────────
@@ -1489,7 +1527,10 @@ function watchDataOrigin() {
 function updateWatchControls() {
   const kowl = watchDataOrigin() === 'kowl';
   document.getElementById('watch-fetch-tabs').style.display = kowl ? 'none' : 'flex';
-  document.getElementById('watch-sub-wrap').style.display   = kowl ? 'none' : 'block';
+  document.getElementById('watch-all-patterns-row').style.display = kowl ? 'none' : 'block';
+  // The single-pattern input is redundant once "watch all" is on — same as
+  // for Kowl (topic-based, no single pattern either).
+  document.getElementById('watch-sub-wrap').style.display   = (kowl || watchAllPatterns) ? 'none' : 'block';
   document.getElementById('watch-kowl-note').style.display  = kowl ? 'block' : 'none';
   if (kowl && !document.getElementById('watch-fetch-panel-extid').style.display)
     document.getElementById('watch-fetch-panel-extid').style.display = 'none';
@@ -1505,8 +1546,46 @@ function setWatchGolden(src) {
   updateWatchControls();
 }
 
+// ── Watch ALL captured subscriber patterns ─────────────────────────────────
+// Only enabled once at least one subscriber snapshot has been captured
+// (Capture Golden → 👤 Subscriber) — otherwise there's nothing to watch by,
+// so the toggle stays greyed out with a prompt to go capture one first.
+let watchAllPatterns = false;
+let watchAllPatternsAvailable = false;
+
+async function refreshWatchAllPatternsAvailability() {
+  const wrap = document.getElementById('watch-all-patterns-wrap');
+  const hint = document.getElementById('watch-all-patterns-hint');
+  if (!wrap) return;
+  let count = 0;
+  try {
+    const res = await fetch('/api/subscriber/goldens');
+    const goldens = await res.json();
+    count = Array.isArray(goldens) ? goldens.length : 0;
+  } catch (e) {
+    count = 0;
+  }
+  watchAllPatternsAvailable = count > 0;
+  wrap.classList.toggle('disabled', !watchAllPatternsAvailable);
+  if (watchAllPatternsAvailable) {
+    hint.innerHTML = `${count} pattern snapshot(s) available from Subscriber Snapshot.`;
+  } else {
+    // Turn the toggle back off if it was on and the snapshots disappeared/were never there.
+    if (watchAllPatterns) { watchAllPatterns = false; wrap.classList.remove('on'); updateWatchControls(); }
+    hint.innerHTML = `No subscriber snapshot captured yet — go to <b>Compare → 👤 Subscriber Snapshot</b> and run Capture, then Compare, first.`;
+  }
+}
+
+function toggleWatchAllPatterns() {
+  if (!watchAllPatternsAvailable) return;  // greyed out — nothing to toggle
+  watchAllPatterns = !watchAllPatterns;
+  document.getElementById('watch-all-patterns-wrap').classList.toggle('on', watchAllPatterns);
+  updateWatchControls();
+}
+
 async function startWatch() {
-  const pattern = document.getElementById('watch-pattern').value.trim();
+  const allPatterns = watchDataOrigin() === 'db' && watchAllPatterns && watchAllPatternsAvailable;
+  const pattern = allPatterns ? '' : document.getElementById('watch-pattern').value.trim();
   const interval   = document.getElementById('watch-interval').value;
 
   let data;
@@ -1515,6 +1594,7 @@ async function startWatch() {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
         pattern, interval, mode: modeState.watch, golden_source: watchGolden,
+        all_patterns: allPatterns,
         ext_id: watchFetchMode === 'extid' ? document.getElementById('watch-extid').value.trim() : null
       })
     });
@@ -1529,6 +1609,7 @@ async function startWatch() {
   document.getElementById('watch-start-btn').disabled = true;
   document.getElementById('watch-stop-btn').disabled  = false;
   setWatchModeLocked(true);
+  document.getElementById('watch-all-patterns-wrap').classList.add('disabled');
   document.getElementById('watch-status-dot').innerHTML = '<span class="pulse"></span>';
   document.getElementById('watch-status-text').textContent = 'Watching...';
 
@@ -1564,18 +1645,25 @@ async function startWatch() {
     log.scrollTop = log.scrollHeight;
 
     if (item.result) {
-      watchResults.push(item.result);
-      renderResultRow(item.result, 'watch-results-body');
+      const r = item.result;
+      if (r.flow) r.create_time = r.flow + ' · ' + r.create_time;
+      watchResults.push(r);
+      renderResultRow(r, 'watch-results-body');
       updateWatchCounters(watchResults);
     }
 
-    if (item.type === 'done') {
+    if (item.type === 'done' || item.type === 'error') {
+      // "error" means the watch thread already died — leaving the UI saying
+      // "Watching..." here would show a live-looking status for a run that
+      // has actually stopped fetching anything, with no obvious sign why
+      // new notifications never show up.
       watchSSE.close();
       document.getElementById('watch-start-btn').disabled = false;
       document.getElementById('watch-stop-btn').disabled  = true;
       setWatchModeLocked(false);
+      document.getElementById('watch-all-patterns-wrap').classList.toggle('disabled', !watchAllPatternsAvailable);
       document.getElementById('watch-status-dot').innerHTML = '';
-      document.getElementById('watch-status-text').textContent = 'Idle';
+      document.getElementById('watch-status-text').textContent = item.type === 'error' ? 'Stopped (error)' : 'Idle';
     }
   };
 }
@@ -1585,6 +1673,7 @@ async function stopWatch() {
   if (watchSSE) { watchSSE.close(); watchSSE = null; }
   document.getElementById('watch-start-btn').disabled = false;
   document.getElementById('watch-stop-btn').disabled  = true;
+  document.getElementById('watch-all-patterns-wrap').classList.toggle('disabled', !watchAllPatternsAvailable);
   setWatchModeLocked(false);
   document.getElementById('watch-status-dot').innerHTML = '';
   document.getElementById('watch-status-text').textContent = 'Stopped';
@@ -2683,6 +2772,7 @@ function resumeWatch() {
   document.getElementById('watch-start-btn').disabled = true;
   document.getElementById('watch-stop-btn').disabled  = false;
   setWatchModeLocked(true);
+  document.getElementById('watch-all-patterns-wrap').classList.add('disabled');
   document.getElementById('watch-status-dot').innerHTML = '<span class="pulse"></span>';
   document.getElementById('watch-status-text').textContent = 'Watching...';
   watchSSE = new EventSource('/api/watch/stream');
@@ -2710,17 +2800,24 @@ function resumeWatch() {
     log.appendChild(line);
     log.scrollTop = log.scrollHeight;
     if (item.result) {
-      watchResults.push(item.result);
-      renderResultRow(item.result, 'watch-results-body');
+      const r = item.result;
+      if (r.flow) r.create_time = r.flow + ' · ' + r.create_time;
+      watchResults.push(r);
+      renderResultRow(r, 'watch-results-body');
       updateWatchCounters(watchResults);
     }
-    if (item.type === 'done') {
+    if (item.type === 'done' || item.type === 'error') {
+      // "error" means the watch thread already died — leaving the UI saying
+      // "Watching..." here would show a live-looking status for a run that
+      // has actually stopped fetching anything, with no obvious sign why
+      // new notifications never show up.
       watchSSE.close();
       document.getElementById('watch-start-btn').disabled = false;
       document.getElementById('watch-stop-btn').disabled  = true;
       setWatchModeLocked(false);
+      document.getElementById('watch-all-patterns-wrap').classList.toggle('disabled', !watchAllPatternsAvailable);
       document.getElementById('watch-status-dot').innerHTML = '';
-      document.getElementById('watch-status-text').textContent = 'Idle';
+      document.getElementById('watch-status-text').textContent = item.type === 'error' ? 'Stopped (error)' : 'Idle';
     }
   };
 }

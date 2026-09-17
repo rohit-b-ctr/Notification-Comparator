@@ -292,19 +292,6 @@ def resolve_subscriber_ids(handle, patterns):
         rows = run_query(handle, f"SELECT id FROM subscriber WHERE pattern IN ({placeholders})", patterns)
     return [r["id"] for r in rows]
 
-def fetch_subscriber_details(handle, patterns):
-    """Fetch the full subscriber row(s) for the given pattern(s) — for
-    diffing baseline vs target beyond just the id."""
-    patterns = [p for p in (patterns or []) if p]
-    if not patterns:
-        return []
-    if handle["mode"] == "onprem":
-        in_list = ",".join(_pg_literal(p) for p in patterns)
-        return run_query(handle, f"SELECT * FROM subscriber WHERE pattern IN ({in_list}) ORDER BY id")
-    else:
-        placeholders = ",".join(["%s"] * len(patterns))
-        return run_query(handle, f"SELECT * FROM subscriber WHERE pattern IN ({placeholders}) ORDER BY id", patterns)
-
 def fetch_all_subscribers(handle):
     """Fetch every row from the subscriber table."""
     return run_query(handle, "SELECT * FROM subscriber")

@@ -738,6 +738,15 @@
       <div id="watch-kowl-note" style="display:none;margin-bottom:14px;font-size:12px;color:var(--text-dim)">
         🧬 Topic-based — watches the configured Kowl topics (<span id="watch-kowl-topics">…</span>). No pattern needed.
       </div>
+      <div style="margin-bottom:14px" id="watch-all-patterns-row">
+        <label style="margin:0;display:flex;align-items:center;gap:10px;cursor:pointer;width:fit-content">
+          <div class="toggle-wrap disabled" id="watch-all-patterns-wrap" onclick="toggleWatchAllPatterns()" title="Watch every pattern captured via Subscriber Snapshot instead of one pattern at a time">
+            <div class="toggle-knob"></div>
+          </div>
+          <span style="font-size:13px;color:var(--text-muted)">👤 Watch ALL captured subscriber patterns</span>
+        </label>
+        <div id="watch-all-patterns-hint" style="font-size:11px;color:var(--text-dim);margin-top:4px">Checking for captured subscriber snapshots…</div>
+      </div>
       <div class="flex-row">
         <div class="sub-input-wrap" id="watch-sub-wrap">
           <label>Pattern</label>
