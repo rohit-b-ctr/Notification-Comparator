@@ -17,6 +17,13 @@ from core.reports import build_html_report, save_report, save_report_meta
 from core.allure import generate_allure, build_allure_results
 from core.state import watch_state, full_watch_state, capture_state
 
+# How many *consecutive* failed polls a Watch/Full Run loop tolerates
+# before giving up for real. A single timeout/dropped-connection blip no
+# longer kills the whole run — it reconnects and retries — but a
+# genuinely dead target (auth revoked, host down) still needs to surface
+# as an error eventually instead of retrying forever with nothing to show.
+MAX_CONSECUTIVE_POLL_FAILURES = 5
+
 def _connect_msg(cfg, target=False):
     """Log-friendly description of how we're connecting — differs by access_mode
     (SSH tunnel + key vs. plain SSH login + sudo psql), so the live log reads
@@ -74,6 +81,13 @@ def capture_live_thread(patterns, interval, ext_id=None):
                         log.put({"type": "info", "msg": f"⏭  [{row['id']}] Already captured: {label}/{key} (keeping first)"})
                 except Exception as e:
                     log.put({"type": "error", "msg": f"⚠️  [{row['id']}] Error: {e}"})
+            if rows:
+                # See the identical comment in watch_thread_fn — advance the
+                # watermark instead of leaving `since` pinned at connect
+                # time, or a fixed-size fetch_notifications page eventually
+                # stops seeing anything new once the [since, now] window
+                # accumulates more rows than that page can hold.
+                since = max(str(r["create_time"]) for r in rows)
             time.sleep(interval)
 
         close_connection(handle)
@@ -194,9 +208,33 @@ def watch_thread_fn(pattern, interval, all_patterns=False):
             log.put({"type": "info", "msg": f"Connected. Watching pattern '{pattern}' ({mode_msg})..."})
 
         ext_id = watch_state.get("ext_id")
+        consecutive_failures = 0
 
         while watch_state["running"]:
-            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
+            try:
+                rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id)
+            except Exception as poll_err:
+                consecutive_failures += 1
+                if consecutive_failures > MAX_CONSECUTIVE_POLL_FAILURES:
+                    raise RuntimeError(
+                        f"Giving up after {consecutive_failures} consecutive poll failures: {poll_err}"
+                    ) from poll_err
+                log.put({"type": "info", "msg": f"⚠️ Poll failed ({poll_err}) — reconnecting and retrying ({consecutive_failures}/{MAX_CONSECUTIVE_POLL_FAILURES})..."})
+                try:
+                    close_connection(handle)
+                except Exception as close_err:
+                    log.put({"type": "info", "msg": f"(cleanup of old connection failed, ignoring: {close_err})"})
+                time.sleep(min(interval, 5))
+                if not watch_state["running"]:
+                    break
+                log.put({"type": "info", "msg": "Reconnecting..."})
+                try:
+                    handle = open_connection(cfg, target=True)
+                    log.put({"type": "info", "msg": "Reconnected."})
+                except Exception as reconnect_err:
+                    log.put({"type": "info", "msg": f"Reconnect failed, will retry: {reconnect_err}"})
+                continue
+            consecutive_failures = 0
             new = [r for r in rows if r["id"] not in seen]
             for row in new:
                 seen.add(row["id"])
@@ -223,10 +261,24 @@ def watch_thread_fn(pattern, interval, all_patterns=False):
                 counts = f"{nfail} diff(s)" + (f", {nwarn} warning(s)" if nwarn else "")
                 flow_str = f"{row_label} " if all_patterns else ""
                 log.put({"type": r["status"].lower().replace(" ", "_"), "msg": f"{icon} {flow_str}[{r['db_id']}]{ext_str} {r['key']} — {counts}", "result": r})
+            if rows:
+                # Advance the watermark to the newest row this poll actually
+                # saw, instead of leaving `since` pinned at connect time.
+                # fetch_notifications caps each poll at 300 rows — with a
+                # fixed `since`, the [since, now] window only grows, and
+                # once more than 300 rows accumulate in it the query keeps
+                # returning the same oldest 300 (all already in `seen`)
+                # forever, silently starving out anything genuinely new.
+                # `seen` (by row id) still covers the exact-duplicate-
+                # timestamp edge case at this new boundary.
+                since = max(str(r["create_time"]) for r in rows)
             time.sleep(interval)
 
-        close_connection(handle)
-        handle = None
+        # handle can be None here if Stop was pressed while the loop above
+        # was mid-reconnect after a failed poll.
+        if handle:
+            close_connection(handle)
+            handle = None
         repeats = sum(c - 1 for c in seen_keys.values() if c > 1)
         if repeats:
             log.put({"type": "info", "msg": f"({repeats} additional notification(s) with an already-seen key were skipped)"})
@@ -291,8 +343,32 @@ def full_watch_thread_fn(interval):
             flows_str = ", ".join(f"{f}={s}" for s, f in sub_to_flow.items())
             log.put({"type": "info", "msg": f"Connected. Full Run watching all flows ({flows_str}) — trigger your automation now..."})
 
+            consecutive_failures = 0
             while full_watch_state["running"]:
-                rows = fetch_notifications(handle, sub_ids, since=since)
+                try:
+                    rows = fetch_notifications(handle, sub_ids, since=since)
+                except Exception as poll_err:
+                    consecutive_failures += 1
+                    if consecutive_failures > MAX_CONSECUTIVE_POLL_FAILURES:
+                        raise RuntimeError(
+                            f"Giving up after {consecutive_failures} consecutive poll failures: {poll_err}"
+                        ) from poll_err
+                    log.put({"type": "info", "msg": f"⚠️ Poll failed ({poll_err}) — reconnecting and retrying ({consecutive_failures}/{MAX_CONSECUTIVE_POLL_FAILURES})..."})
+                    try:
+                        close_connection(handle)
+                    except Exception as close_err:
+                        log.put({"type": "info", "msg": f"(cleanup of old connection failed, ignoring: {close_err})"})
+                    time.sleep(min(interval, 5))
+                    if not full_watch_state["running"]:
+                        break
+                    log.put({"type": "info", "msg": "Reconnecting..."})
+                    try:
+                        handle = open_connection(cfg, target=True)
+                        log.put({"type": "info", "msg": "Reconnected."})
+                    except Exception as reconnect_err:
+                        log.put({"type": "info", "msg": f"Reconnect failed, will retry: {reconnect_err}"})
+                    continue
+                consecutive_failures = 0
                 new = [r for r in rows if r["id"] not in seen]
                 for row in new:
                     seen.add(row["id"])
@@ -315,10 +391,21 @@ def full_watch_thread_fn(interval):
                     log.put({"type": r["status"].lower().replace(" ", "_"),
                              "msg": f"{icon} {r['flow']} [{r['db_id']}]{ext_str} {r['key']} — {counts}",
                              "result": r})
+                if rows:
+                    # See the identical comment in watch_thread_fn — without
+                    # this, the [since, now] window only grows from connect
+                    # time, and once more than fetch_notifications' 300-row
+                    # cap worth of rows accumulate in it, the query keeps
+                    # returning the same oldest 300 (all already `seen`)
+                    # forever, silently starving out anything genuinely new.
+                    since = max(str(r["create_time"]) for r in rows)
                 time.sleep(interval)
 
-            close_connection(handle)
-            handle = None
+            # handle can be None here if Stop was pressed while the loop
+            # above was mid-reconnect after a failed poll.
+            if handle:
+                close_connection(handle)
+                handle = None
             repeats = sum(c - 1 for c in seen_keys.values() if c > 1)
             if repeats:
                 log.put({"type": "info", "msg": f"({repeats} additional notification(s) with an already-seen key were skipped)"})

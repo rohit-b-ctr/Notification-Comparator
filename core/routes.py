@@ -248,17 +248,44 @@ def _db_capture_thread(cfg, patterns, since, ext_id, state):
         handle = open_connection(cfg)
         saved, errors, total_fetched = {}, [], 0
         for i, pattern in enumerate(patterns, 1):
-            log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
-                     "msg": f"[{i}/{total}] Fetching: {pattern}…"})
             label = label_for_pattern(cfg, pattern)
             sub_ids = resolve_subscriber_ids(handle, [pattern])
             if not sub_ids:
                 errors.append(f"No subscriber found for pattern '{pattern}'")
+                log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                         "msg": f"[{i}/{total}] {pattern}: no subscriber found — skipped"})
                 continue
+            # Show every subscriber_id this pattern fans out to up front — a
+            # pattern with several fan-out rows is otherwise a black box
+            # here: there's no way to tell from the log whether all of them
+            # actually got queried, or just one.
+            ids_str = ", ".join(str(s) for s in sub_ids)
+            log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                     "msg": f"[{i}/{total}] Fetching: {pattern} — subscriber_id(s): {ids_str}…"})
             # No since/ext_id given → the "leave blank for last 100" default.
             fetch_limit = 100 if (not since and not ext_id) else 300
-            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id, limit=fetch_limit)
+            # prefer_recent=True — a Capture with a wide/old `since` (e.g.
+            # "since Jan 1") can easily have far more than `limit` matching
+            # rows; without this it fetched the OLDEST `limit` rows in that
+            # window and never got anywhere near today's data, so a flow's
+            # current notification shapes could never be captured no matter
+            # how the since date was set. Capture wants "what does this flow
+            # look like right now", not strict chronological coverage.
+            rows = fetch_notifications(handle, sub_ids, since=since, ext_id=ext_id, limit=fetch_limit, prefer_recent=True)
             total_fetched += len(rows)
+            if len(sub_ids) > 1:
+                # Per-subscriber row counts confirm every fan-out subscriber
+                # actually contributed rows (0 is a real, visible answer too
+                # — a quiet sibling isn't silently indistinguishable from one
+                # that was never queried at all).
+                per_sub = {sid: 0 for sid in sub_ids}
+                for row in rows:
+                    sid = row.get("subscriber_id")
+                    if sid in per_sub:
+                        per_sub[sid] += 1
+                breakdown = ", ".join(f"{sid}: {n} row(s)" for sid, n in per_sub.items())
+                log.put({"type": "progress", "pattern": pattern, "current": i, "total": total,
+                         "msg": f"[{i}/{total}] {pattern} — {breakdown}"})
             for row in rows:
                 try:
                     payload = clean_payload(row["payload"])
@@ -342,8 +369,30 @@ def _db_compare_thread(cfg, patterns, mode, since, ext_id, gsource, state):
             return
         all_results.sort(key=lambda r: r.get("db_id") or 0)
         all_results, skipped_repeats = dedupe_by_key(all_results)
+
+        per_flow = {}
+        for r in all_results:
+            f = r.get("flow", "OTHER")
+            s = per_flow.setdefault(f, {"total": 0, "pass": 0, "fail": 0})
+            s["total"] += 1
+            if r["status"] == "PASS":
+                s["pass"] += 1
+            elif r["status"] == "FAIL":
+                s["fail"] += 1
+        meta = {
+            "Project": current_project() or "(none)",
+            "Golden source": gsource,
+            "Mode": mode,
+            "Run at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Flows": ", ".join(f"{k}({v['pass']}/{v['total']})" for k, v in per_flow.items()) or "none",
+        }
+        report_name = save_report(build_html_report(all_results, "Notification Comparison Report", meta),
+                                  prefix="compare")
+        save_report_meta(report_name, all_results, project=current_project(), mode=mode,
+                         per_flow=per_flow, kind="compare")
+
         log.put({"type": "done", "results": all_results, "total": len(all_results),
-                 "skipped_repeats": skipped_repeats, "missing_patterns": missing})
+                 "skipped_repeats": skipped_repeats, "missing_patterns": missing, "report": report_name})
     except Exception as e:
         log.put({"type": "error", "msg": str(e)})
     finally:
@@ -870,7 +919,11 @@ def api_full_run_stream():
                 yield 'data: {"type":"ping"}\n\n'
                 continue
             yield f"data: {json.dumps(item)}\n\n"
-            if item.get("type") == "done":
+            # See the identical fix on /api/watch/stream — an "error" ends
+            # the run just as much as "done" does; breaking only on "done"
+            # left the stream (and the UI) waiting forever on a thread that
+            # had already died.
+            if item.get("type") in ("done", "error"):
                 break
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -1146,12 +1199,14 @@ def api_compare_json():
     if data.get("ignore_dynamic"):
         a, b = strip_dynamic(a), strip_dynamic(b)
 
-    diff = DeepDiff(a, b, ignore_order=True, verbose_level=2)
+    diff = DeepDiff(a, b, verbose_level=2, threshold_to_diff_deeper=0)
     findings = diff_to_list(diff, mode=mode)
     return jsonify({
         "status": status_from_findings(findings),
         "findings": findings,
         "count": len(findings),
+        "fields": side_by_side_fields(a, b),
+        "golden": a,
         "payload": b,
     })
 
@@ -1178,12 +1233,14 @@ def api_compare_xml():
     if data.get("ignore_dynamic"):
         a, b = strip_dynamic(a), strip_dynamic(b)
 
-    diff = DeepDiff(a, b, ignore_order=True, verbose_level=2)
+    diff = DeepDiff(a, b, verbose_level=2, threshold_to_diff_deeper=0)
     findings = diff_to_list(diff, mode=mode)
     return jsonify({
         "status": status_from_findings(findings),
         "findings": findings,
         "count": len(findings),
+        "fields": side_by_side_fields(a, b),
+        "golden": a,
         "payload": b,
     })
 

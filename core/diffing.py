@@ -55,7 +55,30 @@ def flatten_dict(obj, prefix=""):
 
 def clean_payload(raw):
     data = json.loads(raw) if isinstance(raw, str) else raw
-    return strip_dynamic(normalize(data))
+    data = strip_dynamic(normalize(data))
+    # Some environments/notification-service versions wrap the real event in
+    # a `notification_data` envelope alongside sibling metadata
+    # (version_number, notification_type); others send that same content
+    # flat at the top level with no wrapper at all. notif_key() already
+    # looks inside notification_data first (falling back to flat fields) so
+    # the same logical event gets matched to the same golden either way —
+    # but the actual field-by-field diff was comparing the raw structures
+    # as-is, so a wrapped-vs-flat pair matched under an identical key would
+    # still report nearly every field as added/removed, drowning out real
+    # content drift under the envelope's presence or absence alone.
+    # Unwrapping here (before the golden is ever saved, and before a live
+    # payload is ever diffed) keeps comparisons focused on the event's
+    # actual content regardless of which shape either side happens to use.
+    if isinstance(data, dict) and isinstance(data.get("notification_data"), dict):
+        inner = dict(data["notification_data"])
+        # notif_key()'s inventory-transaction detection specifically checks
+        # this field at the top level — preserve it through the unwrap so
+        # that classification still works, even though the rest of the
+        # envelope (version_number, the wrapper itself) is discarded.
+        if "notification_type" in data and "notification_type" not in inner:
+            inner["notification_type"] = data["notification_type"]
+        return inner
+    return data
 
 def _inventory_transaction_key(payload, nd, ftype):
     """Key for inventory-transaction-shaped payloads (e.g. a physical

@@ -81,6 +81,30 @@ function isValueOnly(f) {
   return f.type === 'values changed';
 }
 
+// Side-by-side field table: baseline (left) vs target (right), every field
+// shown — 'same' fields in the default color, 'warn' (expected drift —
+// timestamps/ids/env-specific values — doesn't fail) in yellow, 'fail'
+// (schema break: missing/extra/type-mismatched field) in red. Shared by
+// every comparator (DB/Watch/Full Run, Kowl/topic, direct JSON/XML,
+// subscriber snapshot) so a nested JSON diff always reads as a flat,
+// scannable field list instead of a raw colorized payload dump.
+const FIELD_STATUS_COLOR = {same: 'var(--text-muted)', warn: '#fbbf24', fail: 'var(--log-fail,#fca5a5)'};
+
+function renderFieldsTable(fields) {
+  if (!fields || !fields.length) return '';
+  return `<div style="overflow-x:auto"><table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px">
+    <colgroup><col style="width:18%"><col style="width:41%"><col style="width:41%"></colgroup>
+    <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
+      <th style="padding:3px 8px">FIELD</th><th style="padding:3px 8px">BASELINE</th><th style="padding:3px 8px">TARGET</th>
+    </tr></thead>
+    <tbody>${fields.map(f => `<tr>
+      <td style="padding:3px 8px;font-family:monospace;font-size:11px;color:var(--text-dim);word-break:break-word;overflow-wrap:anywhere">${escapeHtml(f.path)}</td>
+      <td style="padding:3px 8px;font-family:monospace;color:${FIELD_STATUS_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.baseline))}</td>
+      <td style="padding:3px 8px;font-family:monospace;color:${FIELD_STATUS_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.target))}</td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
 // DB timestamps (create_time) come back with no timezone marker — the DB
 // server's own local clock, typically UTC — and are shown as-is everywhere
 // alongside live-log lines timestamped in the browser's own local time
@@ -158,11 +182,19 @@ function renderResultRow(r, tbodyId) {
 
   const diffBlock = failBlock + warnBlock;
 
-  const jsonBlock = r.payload ? `
+  // Two-pane raw JSON view (baseline left, target right) is the primary
+  // detail view whenever the backend sent a golden to pair against — falls
+  // back to the single colorized payload dump for results that don't have
+  // one (e.g. a NO GOLDEN or ERROR row with nothing to compare against).
+  const jsonBlock = r.golden ? `
+        <div style="font-size:11px;color:#64748b;margin:${diffBlock ? '12px' : '0'} 0 8px">
+          ${diffSummaryLine(r.findings)}
+        </div>
+        ${renderTwoPaneJson(r.golden, r.payload, r.findings)}` : (r.payload ? `
         <div style="font-size:11px;font-weight:700;color:#64748b;margin:${diffBlock ? '12px' : '0'} 0 6px">
           PAYLOAD JSON <span style="font-weight:400;color:var(--text-dim)">— <span style="color:var(--log-pass,#86efac)">green = matches golden</span>, <span style="color:#fbbf24">yellow = value-only drift</span>, <span style="color:var(--log-fail,#fca5a5)">red = schema mismatch</span></span>
         </div>
-        <pre class="payload-json">${colorJsonLines(r.payload, r.findings)}</pre>` : '';
+        <pre class="payload-json">${colorJsonLines(r.payload, r.findings)}</pre>` : '');
 
   if (diffBlock || jsonBlock) {
     const detail = document.createElement('tr');
@@ -311,6 +343,46 @@ function colorJsonLines(payload, findings) {
   ).join('\n');
 }
 
+// "Found N differences — X missing propert(y/ies), Y incorrect type(s),
+// Z unequal value(s)" — a jsondiff-style one-line summary above the
+// two-pane view. Extra Field counts alongside Missing Field since both are
+// "properties out of sync" from the reader's point of view; type/value
+// changes are their own categories since they're a value mismatch, not a
+// structural one.
+function diffSummaryLine(findings) {
+  let missing = 0, typeChanges = 0, valueChanges = 0;
+  (findings || []).forEach(f => {
+    if (f.type === 'Missing Field' || f.type === 'Extra Field') missing++;
+    else if (f.type === 'type changes') typeChanges++;
+    else if (f.type === 'values changed') valueChanges++;
+  });
+  const total = missing + typeChanges + valueChanges;
+  if (!total) return '<b>No differences</b> — payload matches the golden.';
+  const parts = [];
+  if (missing) parts.push(`${missing} missing/extra propert${missing === 1 ? 'y' : 'ies'}`);
+  if (typeChanges) parts.push(`${typeChanges} incorrect type${typeChanges === 1 ? '' : 's'}`);
+  if (valueChanges) parts.push(`${valueChanges} unequal value${valueChanges === 1 ? '' : 's'}`);
+  return `<b>Found ${total} difference${total === 1 ? '' : 's'}</b> — ${parts.join(', ')}`;
+}
+
+// Two full JSON documents side by side (baseline left, target right), each
+// rendered with the same line-level coloring as the single-pane view — a
+// field present only in one side simply doesn't appear when walking the
+// other side's tree, which is what naturally produces the "missing on this
+// side" / "extra on this side" look of a classic two-pane JSON diff.
+function renderTwoPaneJson(golden, payload, findings) {
+  return `<div style="display:flex;gap:12px;flex-wrap:wrap">
+    <div style="flex:1;min-width:260px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-dim);margin-bottom:4px;letter-spacing:.03em">BASELINE (GOLDEN)</div>
+      <pre class="payload-json">${colorJsonLines(golden, findings)}</pre>
+    </div>
+    <div style="flex:1;min-width:260px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-dim);margin-bottom:4px;letter-spacing:.03em">TARGET (LIVE)</div>
+      <pre class="payload-json">${colorJsonLines(payload, findings)}</pre>
+    </div>
+  </div>`;
+}
+
 // A row that passed but still has a value-only finding — surfaced separately
 // in summary tiles so a data-drift warning isn't invisible, without failing it.
 function passedWithWarning(r) {
@@ -414,13 +486,17 @@ async function startFullRun() {
       updateFullRunCounters(fullRunResults);
     }
 
-    if (item.type === 'done') {
+    if (item.type === 'done' || item.type === 'error') {
+      // "error" means the full-run thread already died — same reasoning as
+      // the Watch fix: without this the UI kept showing "Watching all
+      // flows..." for a run that had actually stopped, with no report and
+      // no visible reason why nothing new was arriving.
       fullRunSSE.close();
       document.getElementById('fullrun-start-btn').disabled = false;
       document.getElementById('fullrun-stop-btn').disabled  = true;
       setFullRunModeLocked(false);
       document.getElementById('fullrun-status-dot').innerHTML = '';
-      document.getElementById('fullrun-status-text').textContent = 'Idle';
+      document.getElementById('fullrun-status-text').textContent = item.type === 'error' ? 'Stopped (error)' : 'Idle';
       if (item.report) {
         const dl = document.getElementById('fullrun-report-dl');
         dl.href = '/api/report/' + encodeURIComponent(item.report) + '?download=1';
@@ -643,9 +719,27 @@ function switchCapSource(src) {
 // the payload of the terminal "done"/"error" event. Shared by the
 // capture/compare buttons below so each one shows real progress instead of
 // a static "Connecting..." label for the whole duration of the job.
-async function runWithProgress(btn, idleLabel, startUrl, streamUrl, startOpts) {
+// `consoleId` (optional) is a log-box element to also stream each
+// "Fetching: <pattern>..." progress line into, for callers where seeing
+// exactly which pattern/subscriber is being worked on right now matters
+// (e.g. Capture Golden — a run can cover dozens of patterns).
+async function runWithProgress(btn, idleLabel, startUrl, streamUrl, startOpts, consoleId) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Starting...';
+  const consoleCard = consoleId ? document.getElementById(consoleId).closest('.card') : null;
+  const consoleEl = consoleId ? document.getElementById(consoleId) : null;
+  if (consoleEl) {
+    consoleEl.innerHTML = '';
+    if (consoleCard) consoleCard.style.display = 'block';
+  }
+  const logLine = (text, cls) => {
+    if (!consoleEl) return;
+    const line = document.createElement('div');
+    line.className = 'log-line' + (cls ? ' log-' + cls : '');
+    line.textContent = new Date().toLocaleTimeString() + '  ' + text;
+    consoleEl.appendChild(line);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  };
   try {
     const startRes = await fetch(startUrl, startOpts);
     const start = await startRes.json();
@@ -659,11 +753,14 @@ async function runWithProgress(btn, idleLabel, startUrl, streamUrl, startOpts) {
         if (item.type === 'ping') return;
         if (item.type === 'progress') {
           btn.innerHTML = `<span class="spinner"></span> ⏳ [${item.current}/${item.total}] ${Math.round(100 * item.current / item.total)}%`;
+          logLine(item.msg || `[${item.current}/${item.total}] ${item.pattern || item.label || ''}`);
         } else if (item.type === 'done') {
           sse.close();
+          logLine('✅ Done.', 'pass');
           resolve(item);
         } else if (item.type === 'error') {
           sse.close();
+          logLine('❌ ' + (item.msg || 'Failed'), 'fail');
           reject(new Error(item.msg || 'Failed'));
         }
       };
@@ -682,7 +779,7 @@ async function doCaptureSubscriber() {
   const body = document.getElementById('cap-subscriber-result-body');
   try {
     const data = await runWithProgress(btn, '📸 Capture Subscriber Snapshot',
-      '/api/subscriber/capture/start', '/api/subscriber/capture/stream', {method: 'POST'});
+      '/api/subscriber/capture/start', '/api/subscriber/capture/stream', {method: 'POST'}, 'cap-subscriber-console');
     el.style.display = 'block';
     const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
     body.innerHTML = `
@@ -702,7 +799,7 @@ async function doCompareSubscriber() {
   const el   = document.getElementById('cmp-subscriber-result');
   try {
     const data = await runWithProgress(btn, '🔍 Compare Subscriber Snapshot',
-      '/api/subscriber/compare/start', '/api/subscriber/compare/stream', {method: 'POST'});
+      '/api/subscriber/compare/start', '/api/subscriber/compare/stream', {method: 'POST'}, 'cmp-subscriber-console');
     const body = document.getElementById('cmp-subscriber-result-body');
     const reportBar = document.getElementById('cmp-subscriber-report-bar');
     el.style.display = 'block';
@@ -728,24 +825,9 @@ async function doCompareSubscriber() {
                     : r.status === 'MISSING IN BASELINE' ? '#c084fc' : '#fbbf24';
         const findings = r.findings || [];
         const fields = r.fields || [];
-        // Side-by-side field table: baseline (left) vs target (right), every
-        // field shown — 'same' fields in the default color, 'warn' (expected
-        // drift: env/time/ip/ids — doesn't fail) in yellow, 'fail' (schema
-        // break) in red.
-        const FIELD_COLOR = {same: 'var(--text-muted)', warn: '#fbbf24', fail: 'var(--log-fail,#fca5a5)'};
         let detail;
         if (fields.length) {
-          detail = `<div style="overflow-x:auto"><table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px">
-            <colgroup><col style="width:18%"><col style="width:41%"><col style="width:41%"></colgroup>
-            <thead><tr style="color:var(--text-dim);font-size:10px;text-align:left">
-              <th style="padding:3px 8px">FIELD</th><th style="padding:3px 8px">BASELINE</th><th style="padding:3px 8px">TARGET</th>
-            </tr></thead>
-            <tbody>${fields.map(f => `<tr>
-              <td style="padding:3px 8px;font-family:monospace;font-size:11px;color:var(--text-dim);word-break:break-word;overflow-wrap:anywhere">${escapeHtml(f.path)}</td>
-              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.baseline))}</td>
-              <td style="padding:3px 8px;font-family:monospace;color:${FIELD_COLOR[f.status]};word-break:break-word;overflow-wrap:anywhere">${escapeHtml(String(f.target))}</td>
-            </tr>`).join('')}</tbody>
-          </table></div>`;
+          detail = renderFieldsTable(fields);
         } else {
           detail = findings.map(f => {
             const isWarn = f.type === 'values changed';
@@ -782,13 +864,24 @@ async function doCompareSubscriber() {
 function renderPatternChecks(containerId, patterns) {
   const el = document.getElementById(containerId);
   if (!el) return;
-  el.innerHTML = patterns.length
-    ? patterns.map((p, i) => `
-        <label style="display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer">
-          <input type="checkbox" class="${containerId}-item" value="${p.pattern}" checked>
-          <span><b>${p.label}</b> — ${p.pattern}</span>
-        </label>`).join('')
-    : '<span style="color:var(--log-fail,#fca5a5)">No patterns configured. Add them on the Config tab.</span>';
+  if (!patterns.length) {
+    el.innerHTML = '<span style="color:var(--log-fail,#fca5a5)">No patterns configured. Add them on the Config tab.</span>';
+    return;
+  }
+  const controls = `<div style="margin-bottom:6px;font-size:11px">
+    <a href="#" onclick="event.preventDefault(); setAllPatternChecks('${containerId}', true)" style="color:var(--accent)">Select all</a>
+    <span style="color:var(--text-dim)"> · </span>
+    <a href="#" onclick="event.preventDefault(); setAllPatternChecks('${containerId}', false)" style="color:var(--accent)">Select none</a>
+  </div>`;
+  el.innerHTML = controls + patterns.map((p, i) => `
+      <label style="display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer">
+        <input type="checkbox" class="${containerId}-item" value="${p.pattern}" checked>
+        <span><b>${p.label}</b> — ${p.pattern}</span>
+      </label>`).join('');
+}
+
+function setAllPatternChecks(containerId, checked) {
+  document.querySelectorAll('.' + containerId + '-item').forEach(cb => { cb.checked = checked; });
 }
 
 function checkedPatterns(containerId) {
@@ -951,7 +1044,7 @@ async function doCapture() {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({patterns, since, ext_id})
-    });
+    }, 'cap-console');
     el.style.display = 'block';
     const errs = (data.errors || []).map(e => `<p style="color:#fbbf24;font-size:12px">⚠️ ${e}</p>`).join('');
     body.innerHTML = `
@@ -1260,7 +1353,7 @@ function renderJsonCompare(data) {
   renderResultRow({
     db_id: 'A↔B', create_time: 'direct', ext_id: '',
     key: jsonMode === 'schema' ? 'schema compare' : 'full compare',
-    status: data.status, findings: data.findings, payload: data.payload
+    status: data.status, findings: data.findings, fields: data.fields, golden: data.golden, payload: data.payload
   }, 'json-result-body');
 }
 
@@ -1365,7 +1458,7 @@ function renderXmlCompare(data) {
   renderResultRow({
     db_id: 'A↔B', create_time: 'direct', ext_id: '',
     key: xmlMode === 'schema' ? 'schema compare' : 'full compare',
-    status: data.status, findings: data.findings, payload: data.payload
+    status: data.status, findings: data.findings, fields: data.fields, golden: data.golden, payload: data.payload
   }, 'xml-result-body');
 }
 
@@ -1421,46 +1514,15 @@ function renderTextCompare(data) {
     </tr>`).join('');
 }
 
-// Multi-pattern chip picker for Compare — lets the user queue up several
-// patterns and run them together in one compare instead of one at a time.
-let cmpPatterns = [];
-
-function addCmpPattern() {
-  const input = document.getElementById('cmp-pattern');
-  const val = input.value.trim();
-  if (val && !cmpPatterns.includes(val)) {
-    cmpPatterns.push(val);
-    renderCmpPatternChips();
-  }
-  input.value = '';
-  input.focus();
-}
-
-function removeCmpPattern(p) {
-  cmpPatterns = cmpPatterns.filter(x => x !== p);
-  renderCmpPatternChips();
-}
-
-function renderCmpPatternChips() {
-  const box = document.getElementById('cmp-pattern-chips');
-  if (!box) return;
-  box.innerHTML = cmpPatterns.map(p => `
-    <span class="flow-pill active pill-other" style="cursor:default">
-      ${p}<span style="cursor:pointer;margin-left:6px" onclick="removeCmpPattern('${p.replace(/'/g, "\\'")}')">✕</span>
-    </span>`).join('');
-}
-
 async function doCompare() {
   const btn = document.getElementById('cmp-btn');
 
-  const typed = document.getElementById('cmp-pattern').value.trim();
-  if (typed && !cmpPatterns.includes(typed)) { cmpPatterns.push(typed); renderCmpPatternChips(); }
-  const patterns = cmpPatterns.slice();
+  const patterns = checkedPatterns('cmp-pattern-checks');
   const since  = cmpFetchMode === 'time'  ? datetimeLocalToISO(document.getElementById('cmp-since').value) : null;
   const ext_id = cmpFetchMode === 'extid' ? document.getElementById('cmp-extid').value.trim() : null;
 
   if (patterns.length === 0) {
-    alert('Please add at least one pattern.');
+    alert('Select at least one pattern (add them on the Config tab if none are listed).');
     return;
   }
   if (cmpFetchMode === 'time' && !since) {
@@ -1477,7 +1539,7 @@ async function doCompare() {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({patterns, since, ext_id, mode: modeState.cmp, golden_source: cmpGoldenSource})
-    });
+    }, 'cmp-console');
 
     const pass = data.results.filter(r=>r.status==='PASS').length;
     const fail = data.results.filter(r=>r.status==='FAIL').length;
@@ -1508,7 +1570,24 @@ async function doCompare() {
     if (data.results.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" class="no-results">No notifications found for this time range.</td></tr>';
     } else {
-      data.results.forEach(r => renderResultRow(r, 'cmp-results-body'));
+      // Tag each row with its flow/pattern name in the Time column — with
+      // several patterns checked at once, the Notification Key alone
+      // doesn't reliably identify which pattern a row came from (multiple
+      // patterns can share similar/ambiguous keys), so a row can look like
+      // it's "missing" for a pattern when it's actually sitting there
+      // unlabeled. Matches how Watch/Full Run already render "flow · time".
+      data.results.forEach(r => {
+        if (r.flow) r.create_time = r.flow + ' · ' + r.create_time;
+        renderResultRow(r, 'cmp-results-body');
+      });
+    }
+
+    const reportBar = document.getElementById('cmp-report-bar');
+    if (reportBar) {
+      reportBar.style.display = data.report ? 'flex' : 'none';
+      reportBar.innerHTML = data.report ? `
+        <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}" target="_blank">📄 View Report</a>
+        <a class="btn btn-ghost" style="padding:6px 12px;font-size:12px" href="/api/report/${data.report}?download=1">⬇ Download Report</a>` : '';
     }
   } catch(e) {
     alert('Error: ' + e.message);
@@ -1795,6 +1874,7 @@ async function loadConfig() {
   document.getElementById('cfg-patterns').value =
     (cfg.patterns || []).map(p => `${p.label} = ${p.pattern}`).join('\n');
   refreshPatternsDatalist(cfg.patterns || []);
+  renderPatternChecks('cmp-pattern-checks', cfg.patterns || []);
   // ssh_key is just a file path, not a secret — prefilled like any other field
   document.getElementById('cfg-ssh-key').value  = cfg.ssh_key || '';
   document.getElementById('cfg-ssh-pass').value    = cfg.ssh_pass || '';
@@ -2010,6 +2090,7 @@ async function saveConfig(silent = false) {
   btn.disabled = false;
   if (data.ok) {
     refreshPatternsDatalist(patterns);
+    renderPatternChecks('cmp-pattern-checks', patterns);
     document.getElementById('watch-interval').value = payload.poll_interval;
   }
   return data.ok;
@@ -2750,13 +2831,17 @@ function resumeFullRun() {
       renderResultRow(r, 'fullrun-results-body');
       updateFullRunCounters(fullRunResults);
     }
-    if (item.type === 'done') {
+    if (item.type === 'done' || item.type === 'error') {
+      // "error" means the full-run thread already died — same reasoning as
+      // the Watch fix: without this the UI kept showing "Watching all
+      // flows..." for a run that had actually stopped, with no report and
+      // no visible reason why nothing new was arriving.
       fullRunSSE.close();
       document.getElementById('fullrun-start-btn').disabled = false;
       document.getElementById('fullrun-stop-btn').disabled  = true;
       setFullRunModeLocked(false);
       document.getElementById('fullrun-status-dot').innerHTML = '';
-      document.getElementById('fullrun-status-text').textContent = 'Idle';
+      document.getElementById('fullrun-status-text').textContent = item.type === 'error' ? 'Stopped (error)' : 'Idle';
       if (item.report) {
         const dl = document.getElementById('fullrun-report-dl');
         dl.href = '/api/report/' + encodeURIComponent(item.report) + '?download=1';

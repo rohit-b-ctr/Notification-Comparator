@@ -195,12 +195,24 @@ def process_rows(rows, mode="full", source=None, label=None):
                                  "key": key, "ext_id": ext_id, "status": "NO GOLDEN", "findings": [],
                                  "payload": payload})
             else:
-                diff = DeepDiff(golden, payload, ignore_order=True, verbose_level=2)
+                # ignore_order intentionally off — with it on, DeepDiff's
+                # re-pairing logic for lists of very different lengths (e.g.
+                # a `containers` array with 35 items in the golden vs 1 in a
+                # live payload) collapses the whole matched item into one
+                # unreadable "values changed" blob instead of drilling into
+                # individual fields, and threshold_to_diff_deeper doesn't
+                # apply to that code path. Positional comparison drills all
+                # the way down correctly in every case tested, at the cost
+                # of treating a list that's genuinely just reordered (same
+                # items, different sequence) as changed rather than same.
+                diff = DeepDiff(golden, payload, verbose_level=2, threshold_to_diff_deeper=0)
                 findings = diff_to_list(diff, mode=mode)
                 results.append({"db_id": row["id"], "create_time": str(row["create_time"]),
                                  "key": key, "ext_id": ext_id,
                                  "status": status_from_findings(findings),
                                  "findings": findings,
+                                 "fields": side_by_side_fields(golden, payload),
+                                 "golden": golden,
                                  "payload": payload})
         except Exception as e:
             results.append({"db_id": row.get("id"), "create_time": "?",

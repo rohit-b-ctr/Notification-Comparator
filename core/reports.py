@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 
 from core.config import REPORTS_DIR
+from core.diffing import FAIL_FINDING_TYPES
 
 def _diff_dot_paths(findings):
     """DeepDiff paths (root['a']['b'][0]) -> dot-paths (a.b.0). Mirrors the UI colorizer."""
@@ -21,6 +22,31 @@ def _dot_path_bad(path, diff_paths):
     if path in diff_paths:
         return True
     return any(path.startswith(d + ".") for d in diff_paths)
+
+def _diff_status_paths(findings):
+    """Dot-paths split into 'bad' (real schema break: missing/extra field,
+    type change) vs 'warn' (value-only drift) — mirrors the live UI's
+    3-way field coloring (parseDiffPaths/pathStatus in static/app.js)."""
+    import re
+    bad, warn = set(), set()
+    for f in findings or []:
+        segs = re.findall(r"\[['\"]?[^\]'\"]+['\"]?\]", f.get("path", ""))
+        path = ".".join(seg.strip("[]'\"") for seg in segs)
+        if not path:
+            continue
+        (bad if f.get("type") in FAIL_FINDING_TYPES else warn).add(path)
+    return bad, warn
+
+def _dot_path_status(path, bad_paths, warn_paths):
+    if not path:
+        return "ok"
+    def in_set(s):
+        return path in s or any(path.startswith(d + ".") for d in s)
+    if in_set(bad_paths):
+        return "bad"
+    if in_set(warn_paths):
+        return "warn"
+    return "ok"
 
 def color_payload_html(payload, findings):
     """Pretty-print payload to HTML lines: green = matches golden, red = exact mismatch."""
@@ -54,6 +80,78 @@ def color_payload_html(payload, findings):
         spans.append(f'<span style="{style}">{esc(text)}</span>')
     return "".join(spans)
 
+def _color_json_lines_3way(payload, bad_paths, warn_paths):
+    """Same walk as color_payload_html, but 3-way status (ok/warn/bad) —
+    used by both panes of render_two_pane_json so a value-only drift reads
+    as yellow instead of being lumped in with a real schema break."""
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    lines = []
+
+    def walk(node, path, indent, key, comma):
+        pad = "  " * indent
+        status = _dot_path_status(path, bad_paths, warn_paths)
+        prefix = f'"{key}": ' if key is not None else ""
+        if isinstance(node, (dict, list)):
+            is_arr = isinstance(node, list)
+            lines.append((pad + prefix + ("[" if is_arr else "{"), status))
+            ents = list(enumerate(node)) if is_arr else list(node.items())
+            for i, (k, v) in enumerate(ents):
+                cp = f"{path}.{k}" if path else str(k)
+                walk(v, cp, indent + 1, (None if is_arr else k), i < len(ents) - 1)
+            lines.append((pad + ("]" if is_arr else "}") + ("," if comma else ""), status))
+        else:
+            lines.append((pad + prefix + json.dumps(node, default=str) + ("," if comma else ""), status))
+
+    walk(payload, "", 0, None, False)
+    style = {
+        "ok":   "color:#15803d;display:block;padding:0 4px",
+        "warn": "color:#b45309;background:#fef3c7;display:block;padding:0 4px",
+        "bad":  "color:#b91c1c;background:#fee2e2;display:block;padding:0 4px",
+    }
+    return "".join(f'<span style="{style[s]}">{esc(t)}</span>' for t, s in lines)
+
+def diff_summary_line(findings):
+    """'Found N differences — X missing/extra properties, Y incorrect
+    types, Z unequal values' — mirrors the live UI's diffSummaryLine()."""
+    missing = sum(1 for f in (findings or []) if f["type"] in ("Missing Field", "Extra Field"))
+    type_changes = sum(1 for f in (findings or []) if f["type"] == "type changes")
+    value_changes = sum(1 for f in (findings or []) if f["type"] == "values changed")
+    total = missing + type_changes + value_changes
+    if not total:
+        return "<b>No differences</b> — payload matches the golden."
+    parts = []
+    if missing:
+        parts.append(f"{missing} missing/extra propert{'y' if missing == 1 else 'ies'}")
+    if type_changes:
+        parts.append(f"{type_changes} incorrect type{'' if type_changes == 1 else 's'}")
+    if value_changes:
+        parts.append(f"{value_changes} unequal value{'' if value_changes == 1 else 's'}")
+    return f"<b>Found {total} difference{'' if total == 1 else 's'}</b> — " + ", ".join(parts)
+
+def render_two_pane_json(golden, payload, findings):
+    """Two full JSON documents side by side (baseline left, target right),
+    each colored ok/warn/bad from its own tree walk — a field missing on
+    one side simply never appears when walking that side, which is what
+    naturally produces the classic two-pane diff look. Mirrors
+    renderTwoPaneJson() in static/app.js for the live UI."""
+    bad_paths, warn_paths = _diff_status_paths(findings)
+    pre_style = ("background:#f8fafc;border:1px solid #e5e7eb;border-radius:6px;padding:10px;"
+                 "overflow:auto;font-size:11px;line-height:1.55;margin:6px 0 0;"
+                 "font-family:ui-monospace,Menlo,monospace;white-space:pre")
+    return f"""
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
+      <div style="flex:1;min-width:260px">
+        <div style="font-size:10px;font-weight:700;color:#64748b;margin-bottom:4px;letter-spacing:.03em">BASELINE (GOLDEN)</div>
+        <pre style="{pre_style}">{_color_json_lines_3way(golden, bad_paths, warn_paths)}</pre>
+      </div>
+      <div style="flex:1;min-width:260px">
+        <div style="font-size:10px;font-weight:700;color:#64748b;margin-bottom:4px;letter-spacing:.03em">TARGET (LIVE)</div>
+        <pre style="{pre_style}">{_color_json_lines_3way(payload, bad_paths, warn_paths)}</pre>
+      </div>
+    </div>"""
+
 def build_html_report(results, title="Notification Comparison Report", meta=None):
     """Self-contained HTML report of a comparison run (green=pass, red=fail)."""
     meta = meta or {}
@@ -75,7 +173,19 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
             f'<b>{esc(f["type"])}</b> {esc(f["path"])} {esc(f.get("detail",""))}</div>'
             for f in r.get("findings", [])
         ) or '<div style="color:#16a34a;font-size:12px">✓ matches golden</div>'
-        if r.get("payload") is not None:
+        # Two-pane raw JSON view (baseline left, target right) whenever a
+        # golden was captured alongside the result — falls back to the old
+        # single colorized payload dump for rows that don't have one (e.g.
+        # NO GOLDEN/ERROR). Mirrors renderResultRow()'s jsonBlock in the
+        # live UI so the downloaded report matches what you see on screen.
+        if r.get("golden") is not None:
+            findings += (
+                '<details style="margin-top:6px" open>'
+                f'<summary style="cursor:pointer;font-size:11px;color:#475569">{diff_summary_line(r.get("findings", []))}</summary>'
+                + render_two_pane_json(r["golden"], r.get("payload"), r.get("findings", []))
+                + '</details>'
+            )
+        elif r.get("payload") is not None:
             findings += (
                 '<details style="margin-top:6px"' + (' open' if r.get("findings") else '') + '>'
                 '<summary style="cursor:pointer;font-size:11px;color:#475569">'
@@ -92,6 +202,7 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
         <tr class="notif-row" data-status="{esc(st)}" onclick="toggleNotif('{rid}')" style="border-bottom:1px solid #e5e7eb;cursor:pointer">
           <td style="padding:8px;font-size:11px;color:#94a3b8;width:18px" id="{rid}-arrow">▸</td>
           <td style="padding:8px;font-family:monospace;font-size:12px">{esc(r.get('db_id',''))}</td>
+          <td style="padding:8px;font-family:monospace;font-size:11px;color:#6b7280">{esc(r.get('flow','') or '—')}</td>
           <td style="padding:8px;font-family:monospace;font-size:12px">{esc(r.get('key',''))}</td>
           <td style="padding:8px;font-family:monospace;font-size:11px;color:#6b7280">{esc(r.get('ext_id','') or '—')}</td>
           <td style="padding:8px"><b style="color:{color}">{esc(st)}</b></td>
@@ -99,7 +210,7 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
         </tr>
         <tr class="notif-detail" data-status="{esc(st)}" id="{rid}-detail" style="display:none;border-bottom:1px solid #e5e7eb">
           <td></td>
-          <td colspan="5" style="padding:0 8px 12px">{findings}</td>
+          <td colspan="6" style="padding:0 8px 12px">{findings}</td>
         </tr>""")
 
     meta_rows = "".join(
@@ -155,7 +266,7 @@ def build_html_report(results, title="Notification Comparison Report", meta=None
     <button onclick="collapseAll()" style="padding:5px 12px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;cursor:pointer;font-size:12px">Collapse all</button>
   </div>
   <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
-    <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">ID</th><th style="padding:8px;font-size:11px;color:#64748b">KEY</th><th style="padding:8px;font-size:11px;color:#64748b">REQUEST ID</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
+    <thead><tr style="background:#f1f5f9;text-align:left"><th></th><th style="padding:8px;font-size:11px;color:#64748b">ID</th><th style="padding:8px;font-size:11px;color:#64748b">FLOW</th><th style="padding:8px;font-size:11px;color:#64748b">KEY</th><th style="padding:8px;font-size:11px;color:#64748b">REQUEST ID</th><th style="padding:8px;font-size:11px;color:#64748b">STATUS</th><th style="padding:8px;font-size:11px;color:#64748b">FINDINGS</th></tr></thead>
     <tbody id="notif-tbody">{''.join(rows)}</tbody>
   </table>
   <script>

@@ -474,10 +474,14 @@ def compare_kowl_env(env, label, topic, mode, golden_source, row_id):
             "ext_id": ext_id, "flow": label}
     if golden is None:
         return {**base, "status": "NO GOLDEN", "findings": [], "payload": payload}
-    diff = DeepDiff(golden, payload, ignore_order=True, verbose_level=2)
+    # ignore_order off — see the identical comment in core/golden.py's
+    # process_rows(): with it on, a size-mismatched list collapses into one
+    # unreadable blob instead of a field-by-field diff.
+    diff = DeepDiff(golden, payload, verbose_level=2, threshold_to_diff_deeper=0)
     findings = diff_to_list(diff, mode=mode)
     return {**base, "status": status_from_findings(findings),
-            "findings": findings, "payload": payload}
+            "findings": findings, "fields": side_by_side_fields(golden, payload),
+            "golden": golden, "payload": payload}
 
 _FETCH_TIMEOUT = 25  # seconds — outer wall-clock limit; must stay > fetch_topic_messages'
                      # own hard_timeout (20s default) so that inner timeout — which already

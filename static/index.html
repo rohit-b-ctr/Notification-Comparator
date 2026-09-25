@@ -228,6 +228,10 @@
           <button class="btn btn-success" onclick="doCapture()" id="cap-btn">📸 Capture</button>
         </div>
       </div>
+      <div class="card" id="cap-console-card" style="display:none">
+        <div class="card-title">Live Progress</div>
+        <div class="log-box" id="cap-console"></div>
+      </div>
       <div class="card" id="cap-result" style="display:none">
         <div class="card-title">Result</div>
         <div id="cap-result-body"></div>
@@ -387,6 +391,10 @@
           <button class="btn btn-success" onclick="doCaptureSubscriber()" id="cap-subscriber-btn">📸 Capture Subscriber Snapshot</button>
         </div>
       </div>
+      <div class="card" id="cap-subscriber-console-card" style="display:none">
+        <div class="card-title">Live Progress</div>
+        <div class="log-box" id="cap-subscriber-console"></div>
+      </div>
       <div class="card" id="cap-subscriber-result" style="display:none">
         <div class="card-title">Result</div>
         <div id="cap-subscriber-result-body"></div>
@@ -419,13 +427,8 @@
     <div class="card">
       <div class="flow-sub-row" style="margin-bottom:14px">
         <div class="sub-input-wrap" style="flex:1">
-          <label>Pattern(s)</label>
-          <div style="display:flex;gap:8px">
-            <input type="text" id="cmp-pattern" list="cfg-patterns-datalist" placeholder="e.g. put_information — press Enter or + to add"
-                   style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addCmpPattern();}">
-            <button type="button" class="btn btn-ghost" style="padding:7px 12px;font-size:12px" onclick="addCmpPattern()">+ Add</button>
-          </div>
-          <div id="cmp-pattern-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+          <label>Pattern(s) — from Config; check the ones to compare</label>
+          <div id="cmp-pattern-checks" style="font-size:12px;font-family:monospace;color:#a5b4fc;max-height:140px;overflow-y:auto"></div>
         </div>
       </div>
 
@@ -455,6 +458,10 @@
         <span id="cmp-mode-hint" style="font-size:11px;color:var(--text-dim)">Compares keys, values, and types</span>
       </div>
     </div>
+    <div class="card" id="cmp-console-card" style="display:none">
+      <div class="card-title">Live Progress</div>
+      <div class="log-box" id="cmp-console"></div>
+    </div>
     <div id="cmp-summary" style="display:none">
       <div class="summary-strip">
         <div class="summary-card"><div class="num num-total" id="cmp-total">0</div><div class="lbl">Total</div></div>
@@ -465,10 +472,13 @@
       <div id="cmp-skipped-note" style="display:none;font-size:11px;color:var(--text-dim);margin-top:6px"></div>
     </div>
     <div class="card" id="cmp-results-card" style="display:none">
-      <div class="card-title">Results</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="card-title" style="margin:0">Results</div>
+        <div id="cmp-report-bar" style="display:none;gap:8px"></div>
+      </div>
       <table class="results-table">
         <thead><tr>
-          <th>DB ID</th><th>Time</th><th>Flow Request ID</th><th>Notification Key</th><th>Status</th><th>Diffs</th>
+          <th>DB ID</th><th>Flow / Time</th><th>Flow Request ID</th><th>Notification Key</th><th>Status</th><th>Diffs</th>
         </tr></thead>
         <tbody id="cmp-results-body"></tbody>
       </table>
@@ -655,6 +665,10 @@
         <div class="mt">
           <button class="btn btn-primary" onclick="doCompareSubscriber()" id="cmp-subscriber-btn">🔍 Compare Subscribers</button>
         </div>
+      </div>
+      <div class="card" id="cmp-subscriber-console-card" style="display:none">
+        <div class="card-title">Live Progress</div>
+        <div class="log-box" id="cmp-subscriber-console"></div>
       </div>
       <div class="card" id="cmp-subscriber-result" style="display:none">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
